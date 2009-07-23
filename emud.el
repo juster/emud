@@ -26,6 +26,9 @@ other repetitive commands in MUDs."
   "The font face of the active input area"
   :group 'emud)
 
+;; VARIABLES ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 (defvar mud-mode-keymap
   (let ((map (make-sparse-keymap)))
     (define-key map "\r"       'mud-input-submit)
@@ -36,11 +39,6 @@ other repetitive commands in MUDs."
 ; the sticky properties below don't have to do with sticky-input
 (defvar mud-default-output-props
   '(read-only t rear-nonsticky t front-sticky t mud-color-intensity 1))
-
-;; (defmacro mud-create-color-hook (font-key font-color)
-;;   (lambda ()
-;;     `(,font-key . (if (plist-get mud-output-text-props 'mud-bright)
-;;                       ,font-color (concat "dark" ,font-color)))))
 
 ; ANSI color palette
 (defvar mud-color-palette
@@ -85,19 +83,32 @@ other repetitive commands in MUDs."
     ("46" . (:background ,(nth 6 mud-color-palette)))
     ("47" . (:background ,(nth 7 mud-color-palette)))))
 
-(defun mud-mode ()
-  "Major mode for playing MUDs"
-  (interactive)
-  (unless (eq major-mode 'mud-mode) (kill-all-local-variables))
-  (use-local-map mud-mode-keymap)
-  (setq mode-name "MUD")
-  (setq major-mode 'mud-mode))
+(defvar mud-server-filters
+  (list
+   (cons "\033\\(?:\\[\\(?:\\([0-9;]*\\)\\([^0-9;]\\)?\\)?\\)?"
+         'mud-color-filter))
 
-;; (defun mud-vt100-find-end (recv-string &optional x)
-;;   (when (null x) (setq x 0))
-;;   (if (>= x (length recv-string)) nil
-;;     (if (char-equal ?m (aref recv-string x)) x
-;;       (mud-vt100-find-end recv-string (+ x 1)))))
+  "A list of filters.  Each filter is a cons cell with a regular
+expression and a function to call if the expression matches.
+
+No arguments are passed, instead the filter modifies the
+recv-data variable in place.
+
+Server filters search for regular expressions in the output
+received from the MUD server and change the text in place.  After
+the filter runs the output is passed to the next filter.  After
+all filters are checked, the output is written to the buffer.
+
+Filters can throw a 'filter-resume symbol to abort filtering and
+have the server's next output sent straight to the throwing
+filter.  This is useful if the data the filter is parsing is
+split across two socket receives.  The argument to the throw must
+be the string to prepend to the next recieved text.
+
+Because of the use of throw, all filters should return nil")
+
+;; FILTERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defun mud-store-color-codes (color-codes)
   "Stores the mud color codes as the current color to use.
@@ -135,62 +146,111 @@ The new colors are stored in `mud-output-text-props'."
                  )))))))
 
 
-; Uses the recv-data variable in mud-filter directly
+;; Uses the recv-data variable in mud-filter directly
 (defun mud-color-filter ()
-  (when mud-color-leftover
-    (setq recv-data (concat
-                     (setq mud-color-leftover nil)
-                     recv-data)))
+  (let ((color-codes  (match-string 1 recv-data))
+        (end-code     (match-string 2 recv-data)))
+    
+    (setq recv-data (replace-match "" nil t recv-data))
+    
+    (if end-code
+        ;; ignores codes other than color codes
+        (when (string= end-code "m")              
+          (mud-store-color-codes color-codes))
+      ;; save code for later if it doesn't end
+      ;; (it was split between two sends/recvs)
+      (throw 'mud-filter-continue))))
 
-  (let (pos ansi-code-text)
-    (setq pos 0)
-    (catch 'incomplete-sequence
-      (while (string-match
-              "\033\\(?:\\[\\(?:\\([0-9;]*\\)\\([^0-9;]\\)?\\)?\\)?"
-              recv-data pos)
-        (when (> (match-beginning 0) 0)
-          (set-text-properties pos (match-beginning 0)
-                               mud-output-text-props recv-data))
-        (setq pos (match-beginning 0))
+(defun mud-filter-result-sort (left right)
+  (< (elt left 1) (elt right 1)))
 
-        (let ((entire-match (match-string 0 recv-data))
-              (color-codes  (match-string 1 recv-data))
-              (end-code     (match-string 2 recv-data)))
+(defun mud-filter-matches (filter-list)
+  "Create a list of matched regexps, if any.  Checks each regexp.
 
-              (setq recv-data (replace-match "" nil t recv-data))
+FILTER-LIST is a list of filter pairs: ( REGEXP . FUNCTION ).
+The idea being, if REGEXP matches, FUNCTION is called.
 
-              (if end-code
-                  ;; ignores codes other than color codes
-                  (when (string= end-code "m")
-                    (mud-store-color-codes color-codes))
+A list of matches is returned in a special format.  The filter
+is appended with the match data, as from `match-data'.
 
-                ;; save code for later if it doesn't end
-                ;; (it was split between two sends/recvs)
-                (progn
-                  (setq mud-color-leftover entire-match)
-                  (throw 'incomplete-sequence nil)))))) ; break loop
-
-    ;; probably don't need the throw after all because loop will stop
-    ;; on its own?
-
-    (when (< pos (length recv-data))
-      (set-text-properties pos (length recv-data)
-                           mud-output-text-props recv-data))))
+\( ( ( REGEXP . FUNCTION ) MATCH-DATA ), ... )
+"
+  (if filter-list
+      (if (string-match (caar filter-list) recv-data 0)
+          (cons (cons (car filter-list) (match-data))
+                (mud-filter-matches (cdr filter-list)))
+        (mud-filter-matches (cdr filter-list)))
+    nil))
 
 (defun mud-filter (process recv-data)
-;;   (if (string-match "\xFF" recv-data)
-;;       (message "TELNET IAC FOUND"))
+  ;;   (if (string-match "\xFF" recv-data)
+  ;;       (message "TELNET IAC FOUND"))
 
   (with-current-buffer (process-buffer process)
-    (mud-color-filter)
+
+    ;; Check if there is a continuance from last time.
+    (if mud-filter-continuance
+        (let (( continue-data (catch 'mud-filter-continue
+                                (funcall
+                                 (car mud-filter-continuance)
+                                 (concat
+                                  (cdr mud-filter-continuance)
+                                  recv-data))) ))
+          (if continue-data
+              ;; If this continuance asked to continue AGAIN, don't recurse.
+              (setq mud-filter-continuance
+                    (cons (car mud-filter-continuance) continue-data))
+            (progn
+              (setq mud-filter-continuance nil)
+              (mud-filter process recv-data)))))
+
+    (let (( matches (sort (mud-filter-matches mud-server-filters)
+                          'mud-filter-result-sort) )
+          ( count 0 )
+          ( pos 0 ))
+      (while (not (zerop (length matches)))
+        (let (( next-filter (pop matches) ))
+          (setq count (1+ count))
+          (when (< pos (cadr next-filter))
+            (set-text-properties
+             pos (cadr next-filter) mud-output-text-props
+             recv-data))
+          (set-match-data (cdr next-filter))
+          (funcall (cdar next-filter))
+          (setq pos (cadr next-filter))
+          (when (string-match (caar next-filter) recv-data 0)
+            (push (cons (car next-filter) (match-data)) matches)
+            (setq matches (sort matches 'mud-filter-result-sort)))))
+      (when (< pos (1- (length recv-data)))
+        (set-text-properties pos (1- (length recv-data)) mud-output-text-props
+                             recv-data))))
+    ;;(mud-color-filter)
     (save-excursion
-      (goto-char (process-mark mud-net-process))
-      (insert-before-markers recv-data))))
+      (goto-char (process-mark process))
+      (insert-before-markers recv-data)))
+
+;; FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun mud-mode ()
+  "Major mode for playing MUDs"
+  (interactive)
+  (unless (eq major-mode 'mud-mode) (kill-all-local-variables))
+  (use-local-map mud-mode-keymap)
+  (setq mode-name "MUD")
+  (setq major-mode 'mud-mode))
+
+;; (defun mud-vt100-find-end (recv-string &optional x)
+;;   (when (null x) (setq x 0))
+;;   (if (>= x (length recv-string)) nil
+;;     (if (char-equal ?m (aref recv-string x)) x
+;;       (mud-vt100-find-end recv-string (+ x 1)))))
+
 
 (defun mud-sentinel (mud-process event)
-;;  (when (and mud-process event)
-  (with-current-buffer (process-buffer mud-process)
-    (mud-client-message event)))
+  (when (buffer-name (process-buffer mud-process))
+    (with-current-buffer (process-buffer mud-process)
+      (mud-client-message event))))
 
 (defun mud-connect (hostname port)
   (interactive "sHostname: \nnPort: ")
@@ -214,6 +274,9 @@ The new colors are stored in `mud-output-text-props'."
     (set (make-local-variable 'debug-on-error) 1)
     (set (make-local-variable 'mud-net-process) mud-process)
     (set (make-local-variable 'mud-sticky-input-flag) nil)
+
+    (set (make-local-variable 'mud-filter-continuance) nil)
+    (set (make-local-variable 'mud-color-intensity) 1)
 
     ;; Input History ---------------------------------------
     (set (make-local-variable 'mud-color-leftover) nil)
@@ -259,17 +322,20 @@ The new colors are stored in `mud-output-text-props'."
      (apply 'propertize output mud-output-text-props))))
 
 ;; INPUT AREA ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;(:Helper:) Raich begins touring Ancient Anguish.
+;;;;;;
 
 (defun mud-input-submit ()
   (interactive)
   (when (and
          (not (string= (process-status mud-net-process) "closed"))
          (mud-inside-input-area-p))
+
     ;; We don't want to trigger our own sticky hooks
     (let* ((inhibit-modification-hooks t)
            (user-input (mud-record-input-area)))
-      (process-send-string mud-net-process (concat user-input "\n"))
+      (process-send-strin(:Helper:) Raich: well that hill giant in front of nepeth is dead now
+g mud-net-process (concat user-input "\n"))
       (when mud-sticky-input
         (mud-set-input-area user-input)
         (mud-input-stick))
@@ -282,12 +348,16 @@ The new colors are stored in `mud-output-text-props'."
   "Store the user's input area text into the connected buffer."
   (let* ( (user-input-beg    (overlay-start mud-input-overlay))
           (user-input-end    (overlay-end   mud-input-overlay))
-          (user-input        (buffer-substring user-input-beg user-input-end))
-          (user-inside-input (mud-inside-input-area-p)) )
+          (user-input        (buffer-substring user-input-beg user-input-Near to the west, Decon shouts: Dirty secrets!
+end))
+          (user-inside-input (mud-inside-input-area(:Newbie:) Xareo: is there a way to see how many enemies are currectly
+                attacking me?
+-p)) )
     (save-excursion
       (goto-char user-input-end)
       (insert "\n"))
-    (move-overlay mud-input-overlay (point-max) (point-max) (current-buffer))
+  (:Newbie:) Xareo: hmm
+  (move-overlay mud-input-overlay (point-max) (point-max) (current-buffer))
     (set-marker (process-mark mud-net-process) (point-max))
     (add-text-properties user-input-beg user-input-end
                          '(read-only t rear-nonsticky t front-sticky t))
@@ -311,8 +381,8 @@ The new colors are stored in `mud-output-text-props'."
   (and (>= (point) (overlay-start mud-input-overlay))
        (<= (point) (overlay-end mud-input-overlay))))
 
-;; STICKY INPUT ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; STICKY INPUT ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defun mud-input-sticky-off ()
   (overlay-put mud-input-overlay 'modification-hooks nil)
@@ -390,7 +460,9 @@ The new colors are stored in `mud-output-text-props'."
           ;; wrap around to the vector's beginning
           (when (>= mud-input-history-current (length mud-input-history))
             (setq mud-input-history-current 0))
-          (mud-set-input-area (aref mud-input-history mud-input-history-current))
+          (mud-set-input-area (aref
+                               mud-input-history
+                               mud-input-history-current))
           (when mud-sticky-input (mud-input-stick))
           (goto-char (overlay-end mud-input-overlay))
           nil) ; so message is not printed
