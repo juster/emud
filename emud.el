@@ -1,6 +1,9 @@
 ;; Emacs MUD Client
 ;; emud.el - 07/22/08
-;; by Justin Davis < jrcd ATAT gmail >
+;; by Justin Davis < jrcd83 ATAT gmail >
+
+;; CUSTOMIZE ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defgroup emud nil
   "The Emacs MUD Client"
@@ -26,8 +29,21 @@ other repetitive commands in MUDs."
   "The font face of the active input area"
   :group 'emud)
 
-;; VARIABLES ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(defface mud-client-message
+  '( ( ((class color))
+       (:foreground "yellow")
+       ) )
+  "The font face for messages from the mud client"
+  :group 'emud)
+
+(defcustom mud-settings-file "~/.emudrc"
+  "File to evaluate, which sets the global and mud-specific
+settings like triggers, aliases, etc."
+  :type 'file
+  :group 'emud)
+
+;; VARIABLES ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defvar mud-mode-keymap
   (let ((map (make-sparse-keymap)))
@@ -83,13 +99,23 @@ other repetitive commands in MUDs."
     ("46" . (:background ,(nth 6 mud-color-palette)))
     ("47" . (:background ,(nth 7 mud-color-palette)))))
 
+(defvar mud-settings
+  '(( :GLOBAL . (( :triggers . (( "https?://[A-Za-z0-9./?=&;]+" . mud-trigger-url )) )
+                 ( :aliases  . () ))
+              ))
+  "Custom mud settings (i.e. triggers, aliases).  The list is
+organized as an alist.  Global settings have the :GLOBAL key,
+mud-specific settings have the mud hostname as the key.")
+
 (defvar mud-server-filters
-  (list
-   (cons "\033\\(?:\\[\\(?:\\([0-9;]*\\)\\([^0-9;]\\)?\\)?\\)?"
-         'mud-color-filter))
+  '((mud-color-filter
+     . "\033\\(?:\\[\\(?:\\([0-9;]*\\)\\([^0-9;]\\)?\\)?\\)?")
+    (mud-telnet-filter . "\xFF\\([\xFB-\xFE].\\)"))
 
   "A list of filters.  Each filter is a cons cell with a regular
 expression and a function to call if the expression matches.
+Filters match special characters, remove them from the server output,
+and change text properties setting `mud-output-text-props'.
 
 No arguments are passed, instead the filter modifies the
 recv-data variable in place.
@@ -103,12 +129,63 @@ Filters can throw a 'filter-resume symbol to abort filtering and
 have the server's next output sent straight to the throwing
 filter.  This is useful if the data the filter is parsing is
 split across two socket receives.  The argument to the throw must
-be the string to prepend to the next recieved text.
-
-Because of the use of throw, all filters should return nil")
+be the string to prepend to the next recieved text.")
 
 ;; FILTERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defvar mud-telnet-codes
+  '((?\xFF . :IAC)
+    (?\xFE . :SE)
+    (?\xFB . :WILL)
+    (?\xFC . :WONT)
+    (?\xFD . :DO)
+    (?\xFE . :DONT)))
+
+(defmacro mud-telnet-code (symbol)
+  `(car (or () (rassq ,symbol mud-telnet-codes))))
+
+(defvar mud-telnet-code-iac  "\xFF")
+(defvar mud-telnet-code-se   "\xFE")
+(defvar mud-telnet-code-will "\xFB")
+(defvar mud-telnet-code-wont "\xFC")
+(defvar mud-telnet-code-do   "\xFD")
+(defvar mud-telnet-code-dont "\xFE")
+
+(defun mud-telnet-confirm (accept-flag opt-code)
+  "Uses process from `mud-filter'."
+  (process-send-string process
+                       (concat
+                        mud-telnet-code-iac
+                        (if accept-flag
+                            mud-telnet-code-will
+                          mud-telnet-code-wont)
+                        (char-to-string opt-code)
+                        mud-telnet-code-se)))
+
+(defun mud-telnet-extract-codes (telnet-code-string &optional pos)
+  (unless pos (setq pos 0))
+  (if (>= pos (length telnet-code-string))
+      nil
+    (let* (( code       (aref telnet-code-string pos) )
+           ( code-assoc (assoc code mud-telnet-codes) ))
+      (cons (if code-assoc
+                (cdr code-assoc)
+              code)
+            (mud-telnet-extract-codes telnet-code-string (1+ pos))))))
+
+(defun mud-telnet-filter ()
+  (let* (( telnet-codes (match-string 1 recv-data) )
+         ( code-symbols (mud-telnet-extract-codes telnet-codes) ))
+
+;;    (message "DEBUG: parsed symbols: %s" code-symbols)
+    (cond ((= (elt code-symbols 1) 1)
+;;           (message "DEBUG: received echo code")
+           (let (( echo (not (eq (car code-symbols) :WILL)) ))
+;;             (message "DEBUG: echo = %s" echo)
+             (mud-input-echo echo)
+             (setq mud-local-echo echo)))))
+  nil)
 
 (defun mud-store-color-codes (color-codes)
   "Stores the mud color codes as the current color to use.
@@ -139,6 +216,7 @@ The new colors are stored in `mud-output-text-props'."
                       (face-prop (list (car code-action)
                                        (nth color-intensity
                                             (cadr code-action)))))
+                 ;; Preserve existing text properties
                  (if (plist-get 'face mud-output-text-props)
                      (plist-put (plist-get 'font mud-output-text-props)
                                 (car face-prop) (cadr face-prop))
@@ -151,36 +229,63 @@ The new colors are stored in `mud-output-text-props'."
   (let ((color-codes  (match-string 1 recv-data))
         (end-code     (match-string 2 recv-data)))
     
-    (setq recv-data (replace-match "" nil t recv-data))
-    
     (if end-code
         ;; ignores codes other than color codes
         (when (string= end-code "m")              
           (mud-store-color-codes color-codes))
       ;; save code for later if it doesn't end
       ;; (it was split between two sends/recvs)
-      (throw 'mud-filter-continue))))
+      (throw 'mud-filter-continue t))))
 
 (defun mud-filter-result-sort (left right)
-  (< (elt left 1) (elt right 1)))
+;;  (message "DEBUG sorting, left = %s -- right = %s" left right)
+  (< (cadr left) (cadr right)))
 
 (defun mud-filter-matches (filter-list)
   "Create a list of matched regexps, if any.  Checks each regexp.
 
 FILTER-LIST is a list of filter pairs: ( REGEXP . FUNCTION ).
-The idea being, if REGEXP matches, FUNCTION is called.
+The idea being, if RJuanKa leaves west.
+JuanKa arrives.
+Dayman leaves east.
+Dayman arrives.
+EGEXP matches, FUNCTION is called.
 
 A list of matches is returned in a special format.  The filter
 is appended with the match data, as from `match-data'.
 
-\( ( ( REGEXP . FUNCTION ) MATCH-DATA ), ... )
+The result is a sorted associated list:
+\( ( FUNCTION-SYMBOL . ( MATCH-DATA ) ), ... )
 "
   (if filter-list
-      (if (string-match (caar filter-list) recv-data 0)
-          (cons (cons (car filter-list) (match-data))
-                (mud-filter-matches (cdr filter-list)))
-        (mud-filter-matches (cdr filter-list)))
+      (let (( filter (car filter-list) ))
+;;        (message "DEBUG: filter regexp = %s" (cdr filter))
+        (if (string-match (cdr filter) recv-data 0)
+            ;; Construct an associated list like the one in description.
+            (cons (cons (car filter)
+                        (match-data))
+                  (mud-filter-matches (cdr filter-list)))
+          (mud-filter-matches (cdr filter-list))))
     nil))
+
+(defun mud-filter-helper (pos filter)
+  (let (( match-regexp (cdr (assq (car filter) mud-server-filters)))
+        ( match-list   (cdr filter)))
+    ;; set preceding text to the old text properties
+    (when (< pos (car match-list))
+      (set-text-properties pos (car match-list)
+                           mud-output-text-props recv-data))
+    (set-match-data match-list)
+    (when (catch 'mud-filter-continue (funcall (car filter)))
+        ;; If the filter requested a continuation, store its the data.
+      (setq mud-filter-continuation
+            (substring recv-data pos (length recv-data)))
+;;      (message "DEBUG: continuation: %s" mud-filter-continuation)
+      (setq recv-data (substring recv-data 0 pos))
+      (throw 'mud-filter-continue t))
+    (set-match-data match-list)
+    (setq recv-data (replace-match "" nil t recv-data))
+    (car match-list)))
 
 (defun mud-filter (process recv-data)
   ;;   (if (string-match "\xFF" recv-data)
@@ -188,46 +293,40 @@ is appended with the match data, as from `match-data'.
 
   (with-current-buffer (process-buffer process)
 
-    ;; Check if there is a continuance from last time.
-    (if mud-filter-continuance
-        (let (( continue-data (catch 'mud-filter-continue
-                                (funcall
-                                 (car mud-filter-continuance)
-                                 (concat
-                                  (cdr mud-filter-continuance)
-                                  recv-data))) ))
-          (if continue-data
-              ;; If this continuance asked to continue AGAIN, don't recurse.
-              (setq mud-filter-continuance
-                    (cons (car mud-filter-continuance) continue-data))
-            (progn
-              (setq mud-filter-continuance nil)
-              (mud-filter process recv-data)))))
+    ;; If a filter is continuing from before, prepend the old data.
+    (when mud-filter-continuation
+      (setq recv-data (concat mud-filter-continuation recv-data))
+      (setq mud-filter-continuation nil))
 
-    (let (( matches (sort (mud-filter-matches mud-server-filters)
-                          'mud-filter-result-sort) )
-          ( count 0 )
-          ( pos 0 ))
-      (while (not (zerop (length matches)))
-        (let (( next-filter (pop matches) ))
-          (setq count (1+ count))
-          (when (< pos (cadr next-filter))
-            (set-text-properties
-             pos (cadr next-filter) mud-output-text-props
-             recv-data))
-          (set-match-data (cdr next-filter))
-          (funcall (cdar next-filter))
-          (setq pos (cadr next-filter))
-          (when (string-match (caar next-filter) recv-data 0)
-            (push (cons (car next-filter) (match-data)) matches)
-            (setq matches (sort matches 'mud-filter-result-sort)))))
-      (when (< pos (1- (length recv-data)))
-        (set-text-properties pos (1- (length recv-data)) mud-output-text-props
-                             recv-data))))
-    ;;(mud-color-filter)
+    (catch 'mud-filter-continue
+      (let (( pos 0 )
+            ( matches (sort (mud-filter-matches mud-server-filters)
+                            'mud-filter-result-sort))
+            ( next-filter nil )
+            ( match-regexp nil ))
+
+        (while (> (length matches) 0)
+;;          (message "DEBUG: matches = %s" matches)
+          (setq next-filter (pop matches))
+          (setq pos (mud-filter-helper pos next-filter))
+          (setq match-regexp (cdr (assq (car next-filter) mud-server-filters)))
+
+          ;; If this same filter matches again, make sure to put
+          ;; it back in the results list, resorted.
+          (when (string-match match-regexp recv-data pos)
+            (setq matches
+                  (sort (cons (cons (car next-filter) (match-data)) matches)
+                        'mud-filter-result-sort))))
+
+        ;; Set the text properties of leftover text after all filters.
+        (when (< pos (1- (length recv-data)))
+          (set-text-properties
+           pos (length recv-data)
+           mud-output-text-props recv-data))))
+
     (save-excursion
       (goto-char (process-mark process))
-      (insert-before-markers recv-data)))
+      (insert-before-markers recv-data))))
 
 ;; FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -250,21 +349,22 @@ is appended with the match data, as from `match-data'.
 (defun mud-sentinel (mud-process event)
   (when (buffer-name (process-buffer mud-process))
     (with-current-buffer (process-buffer mud-process)
-      (mud-client-message event))))
+      (mud-client-message (replace-regexp-in-string "\n+$" "" event)))))
 
 (defun mud-connect (hostname port)
   (interactive "sHostname: \nnPort: ")
 
-  (let* ((mud-name    (format "%s:%d" hostname port))
-         (mud-buffer  (generate-new-buffer mud-name))
-         (mud-process (make-network-process
-                       :name             mud-name
-                       :host             hostname
-                       :service          port
-                       :buffer           mud-buffer
-                       :filter           'mud-filter
-                       :filter-multibyte t
-                       :sentinel         'mud-sentinel)) )
+  (let* (( mud-name    (format "%s:%d" hostname port) )
+         ( mud-buffer  (generate-new-buffer mud-name) )
+         ( mud-process (make-network-process
+                        :name             mud-name
+                        :host             hostname
+                        :service          port
+                        :coding           'raw-text
+                        :buffer           mud-buffer
+                        :filter           'mud-filter
+                        :filter-multibyte t
+                        :sentinel         'mud-sentinel)) )
 
     ;; LOCAL VARIABLES
     (set-buffer mud-buffer)
@@ -275,8 +375,10 @@ is appended with the match data, as from `match-data'.
     (set (make-local-variable 'mud-net-process) mud-process)
     (set (make-local-variable 'mud-sticky-input-flag) nil)
 
-    (set (make-local-variable 'mud-filter-continuance) nil)
+    (set (make-local-variable 'mud-filter-continuation) nil)
     (set (make-local-variable 'mud-color-intensity) 1)
+
+    (set (make-local-variable 'mud-local-echo) t)
 
     ;; Input History ---------------------------------------
     (set (make-local-variable 'mud-color-leftover) nil)
@@ -307,12 +409,22 @@ is appended with the match data, as from `match-data'.
     (overlay-put mud-input-overlay 'field 'mud-input)
     (overlay-put mud-input-overlay 'non-rearsticky t)
     (overlay-put mud-input-overlay 'face "mud-input-area")
+    (overlay-put mud-input-overlay 'invisible nil)
 
     (set-window-buffer (selected-window) mud-buffer)))
 
 (defun mud-client-message (message)
   "Send a message to the user from the MUD client."
-  (mud-append-server-output (concat "%%% " message "\n")))
+  (save-excursion
+    (goto-char (process-mark mud-net-process))
+    (insert-before-markers
+     (let (( prop-list mud-output-text-props ))
+       (plist-put prop-list 'face "mud-client-message")
+;;        (plist-put prop-list 'rear-sticky nil)
+;;        (plist-put prop-list 'front-sticky nil)
+       (apply 'propertize (format "*EMUD* says: \"%s\"\n" message)
+              prop-list)))))
+
 
 (defun mud-append-server-output (output)
   "Append text from the server before the input area."
@@ -322,8 +434,10 @@ is appended with the match data, as from `match-data'.
      (apply 'propertize output mud-output-text-props))))
 
 ;; INPUT AREA ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;(:Helper:) Raich begins touring Ancient Anguish.
-;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun mud-input-echo (on)
+  (overlay-put mud-input-overlay 'invisible (if on nil t)))
 
 (defun mud-input-submit ()
   (interactive)
@@ -334,8 +448,7 @@ is appended with the match data, as from `match-data'.
     ;; We don't want to trigger our own sticky hooks
     (let* ((inhibit-modification-hooks t)
            (user-input (mud-record-input-area)))
-      (process-send-strin(:Helper:) Raich: well that hill giant in front of nepeth is dead now
-g mud-net-process (concat user-input "\n"))
+      (process-send-string mud-net-process (concat user-input "\n"))
       (when mud-sticky-input
         (mud-set-input-area user-input)
         (mud-input-stick))
@@ -348,19 +461,18 @@ g mud-net-process (concat user-input "\n"))
   "Store the user's input area text into the connected buffer."
   (let* ( (user-input-beg    (overlay-start mud-input-overlay))
           (user-input-end    (overlay-end   mud-input-overlay))
-          (user-input        (buffer-substring user-input-beg user-input-Near to the west, Decon shouts: Dirty secrets!
-end))
-          (user-inside-input (mud-inside-input-area(:Newbie:) Xareo: is there a way to see how many enemies are currectly
-                attacking me?
--p)) )
-    (save-excursion
-      (goto-char user-input-end)
-      (insert "\n"))
-  (:Newbie:) Xareo: hmm
-  (move-overlay mud-input-overlay (point-max) (point-max) (current-buffer))
+          (user-input        (buffer-substring user-input-beg user-input-end))
+          (user-inside-input (mud-inside-input-area-p)) )
+;;    (message "DEBUG: mud-local-echo = %s" mud-local-echo)
+    (if mud-local-echo
+        (save-excursion
+          (goto-char user-input-end)
+          (insert-before-markers-and-inherit "\n")
+          (add-text-properties user-input-beg (1+ user-input-end)
+                               '(read-only t rear-nonsticky t front-sticky t)))
+      (delete-region user-input-beg user-input-end))
+    (move-overlay mud-input-overlay (point-max) (point-max) (current-buffer))
     (set-marker (process-mark mud-net-process) (point-max))
-    (add-text-properties user-input-beg user-input-end
-                         '(read-only t rear-nonsticky t front-sticky t))
     (when user-inside-input (goto-char (point-max)))
     user-input))
 
@@ -468,4 +580,27 @@ end))
           nil) ; so message is not printed
     (message "End of input history reached.")))
 
+;; MUD SETTINGS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun load-mud-settings ()
+  (when (file-exists-p mud-settings-file)
+    (unless (file-readable-p mud-settings-file)
+      (error "EMUD settings file %s exists, but does not have read permission"
+             mud-settings-file))
+    (let* (( settings-buffer (generate-new-buffer "EMUD Settings") ))
+      (with-current-buffer settings-buffer
+        (insert-file-contents-literally mud-settings-file))
+      (setq mud-settings (read settings-buffer))
+      (kill-buffer settings-buffer))))
+
+(defun save-mud-settings ()
+  (let* (( settings-buffer (generate-new-buffer "EMUD Settings") ))
+    (print mud-settings settings-buffer)
+    (with-current-buffer settings-buffer
+      (write-file mud-settings-file))
+    (kill-buffer settings-buffer)))
+
 (provide 'emud)
+
+; EOF
