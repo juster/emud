@@ -2,8 +2,10 @@
 ;; emud.el - 07/22/08
 ;; by Justin Davis < jrcd83 ATAT gmail >
 
+
 ;; CUSTOMIZE ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 
 (defgroup emud nil
   "The Emacs MUD Client"
@@ -42,8 +44,10 @@ settings like triggers, aliases, etc."
   :type 'file
   :group 'emud)
 
+
 ;; VARIABLES ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 
 (defvar mud-mode-keymap
   (let ((map (make-sparse-keymap)))
@@ -100,7 +104,8 @@ settings like triggers, aliases, etc."
     ("47" . (:background ,(nth 7 mud-color-palette)))))
 
 (defvar mud-settings
-  '(( :GLOBAL . (( :triggers . (( "https?://[A-Za-z0-9./?=&;]+" . mud-trigger-url )) )
+  '(( :GLOBAL . (( :triggers . (( "https?://[A-Za-z0-9./?=&;]+" .
+                                  mud-trigger-url )) )
                  ( :aliases  . () ))
               ))
   "Custom mud settings (i.e. triggers, aliases).  The list is
@@ -131,8 +136,10 @@ filter.  This is useful if the data the filter is parsing is
 split across two socket receives.  The argument to the throw must
 be the string to prepend to the next recieved text.")
 
+
 ;; FILTERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 
 (defvar mud-telnet-codes
   '((?\xFF . :IAC)
@@ -288,9 +295,12 @@ The result is a sorted associated list:
     (car match-list)))
 
 (defun mud-filter (process recv-data)
-  ;;   (if (string-match "\xFF" recv-data)
-  ;;       (message "TELNET IAC FOUND"))
+  "The master mud server output filter for the MUD connection/process.
 
+Filters through the data by checking every filter in
+`mud-server-filters' and filtering out unprintables with them.
+
+Checks all mud server output for any trigger matches after that."
   (with-current-buffer (process-buffer process)
 
     ;; If a filter is continuing from before, prepend the old data.
@@ -324,12 +334,123 @@ The result is a sorted associated list:
            pos (length recv-data)
            mud-output-text-props recv-data))))
 
+    (mud-triggers)
+
     (save-excursion
       (goto-char (process-mark process))
       (insert-before-markers recv-data))))
 
-;; FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; TRIGGERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+(defun mud-triggers ()
+  "Check all mud server output for text matching triggers.
+
+This function takes no parameters, but uses the recv-data
+parameter from `mud-filter', where it is called from.
+
+Each trigger is a cons cell with a REGEXP and corresponding action:
+\( REGEXP . ACTION )
+
+If the first element of the action is a symbol or lambda the
+ACTION function is evaluated.  Arguments to the ACTION are the matching
+text and the list of match results.  The match results are adjusted
+to be relative to the matching text, NOT the entire recv-data string.
+
+The function must return the new string to replace the match with.
+
+Otherwise, the action is assumed to be text properties which are
+then applied to the entire regexp match.
+"
+;;  (message "DEBUG: mud-active-triggers = %s" mud-active-triggers)
+
+  (let (( pos 0 ))
+    (dolist (trigger mud-active-triggers)
+      (while (string-match (car trigger) recv-data pos)
+        (cond ((symbolp (cdr trigger)) ; trigger is a symbol or lambda
+               (let ( trigger-result   ; hopefully a function...
+                      orig-match-data
+                      trigger-match-data
+                      match-start )
+                 (setq orig-match-data (match-data)
+                       match-start     (car orig-match-data)
+                       trigger-match-data ; make relative to matched string
+                       (mapcar (lambda (pos) (- pos match-start))
+                               trigger-match-data))
+                 (setq trigger-result
+                       (funcall (cdr trigger)
+                                (substring recv-data
+                                           (car orig-match-data)
+                                           (cadr orig-match-data))
+                                trigger-match-data))
+                 (when (stringp trigger-result)
+                   (setq recv-data
+                         (replace-match trigger-result t nil recv-data)))
+                 (setq pos (+ (car orig-match-data)
+                              (length trigger-result)))))
+
+              ((listp (cdr trigger))
+               (add-text-properties (match-beginning 0) (match-end 0)
+                                    (cdr filter)))
+
+              (t (error "Unknown trigger action type for regexp %s"
+                        (car trigger))))))))
+
+(defun mud-load-triggers (mud-hostname)
+  (let* (( loaded-triggers (if (assoc mud-hostname mud-settings)
+                               (copy-tree
+                                (cdr (assoc
+                                      :triggers
+                                      (cdr (assoc mud-hostname mud-settings))
+                                          '(( :triggers . '() )))))
+                             '()) )
+         ( global-triggers
+           (cdr (assoc
+                 :triggers
+                 (cdr (assq :GLOBAL mud-settings)))) ))
+
+;;    (message "DEBUG: loaded-triggers = %s\nDEBUG: global-triggers = %s"
+;;             loaded-triggers global-triggers)
+    (dolist (trigger-pair global-triggers)
+      (unless (assoc (car trigger-pair) loaded-triggers)
+        (setq loaded-triggers (cons trigger-pair loaded-triggers))))
+    loaded-triggers))
+
+
+;; BUILTIN TRIGGERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+(defun mud-trigger-url (url match-list)
+  (let (( map (make-sparse-keymap) ))
+    (define-key map [mouse-1] 'mud-open-url-command)
+    (add-text-properties 0 (length url)
+                         (list 'mouse-face 'highlight 'keymap map 'url url
+                               'help-echo "mouse-1: Open this URL in a browser")
+                         url))
+  url)
+
+(defun mud-open-url-command (event)
+  "Open the URL that was clicked on, either in Emacs or another
+window (firefox)."
+  (interactive "e")
+  (let (window pos url)
+    (save-excursion
+      (setq window (posn-window (event-end event))
+            pos    (posn-point  (event-end event)))
+      (if (not (windowp window))
+          (error "Unknown URL link clicked"))
+      (set-buffer (window-buffer window))
+      ;;(goto-char pos)
+      (setq url (get-text-property (1- pos) 'url )))
+    (browse-url url)))
+
+
+;; FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 
 (defun mud-mode ()
   "Major mode for playing MUDs"
@@ -351,6 +472,43 @@ The result is a sorted associated list:
     (with-current-buffer (process-buffer mud-process)
       (mud-client-message (replace-regexp-in-string "\n+$" "" event)))))
 
+(defun mud-make-local-variables (hostname)
+  (set (make-local-variable 'mud-host-name) hostname)
+  (set (make-local-variable 'debug-on-error) 1)
+  (set (make-local-variable 'mud-net-process)
+       (get-buffer-process (current-buffer)))
+  (set (make-local-variable 'mud-sticky-input-flag) nil)
+  (set (make-local-variable 'mud-filter-continuation) nil)
+  (set (make-local-variable 'mud-color-intensity) 1)
+  (set (make-local-variable 'mud-local-echo) t)
+  (set (make-local-variable 'mud-active-triggers)
+       (mud-load-triggers hostname))
+
+;;  (message "DEBUG: mud-active-triggers = %s" mud-active-triggers)
+
+  ;; Input History ---------------------------------------
+  (set (make-local-variable 'mud-color-leftover) nil)
+  (set (make-local-variable 'mud-input-history)
+       (make-vector mud-history-max ""))
+  (set (make-local-variable 'mud-input-history-head) 0)
+  (set (make-local-variable 'mud-input-history-tail) 0)
+  (set (make-local-variable 'mud-input-history-current) 0)
+  ;; -----------------------------------------------------
+    
+  ;; Text properties -------------------------------------
+  (set (make-local-variable 'mud-output-text-props)
+       (copy-tree mud-default-output-props))
+
+  (set (make-local-variable 'tab-width) 8)
+  (set (make-local-variable 'default-tab-width) 8)
+  ;; -----------------------------------------------------
+
+
+  ;; Override external variables
+  (set (make-local-variable 'scroll-conservatively) 1000)
+                                        ; set to a high number
+  (buffer-disable-undo))                ; undo don't work good
+
 (defun mud-connect (hostname port)
   (interactive "sHostname: \nnPort: ")
 
@@ -366,46 +524,14 @@ The result is a sorted associated list:
                         :filter-multibyte t
                         :sentinel         'mud-sentinel)) )
 
-    ;; LOCAL VARIABLES
     (set-buffer mud-buffer)
     (let ( (default-major-mode 'mud-mode) )
       (set-buffer-major-mode mud-buffer))
-
-    (set (make-local-variable 'debug-on-error) 1)
-    (set (make-local-variable 'mud-net-process) mud-process)
-    (set (make-local-variable 'mud-sticky-input-flag) nil)
-
-    (set (make-local-variable 'mud-filter-continuation) nil)
-    (set (make-local-variable 'mud-color-intensity) 1)
-
-    (set (make-local-variable 'mud-local-echo) t)
-
-    ;; Input History ---------------------------------------
-    (set (make-local-variable 'mud-color-leftover) nil)
-    (set (make-local-variable 'mud-input-history)
-         (make-vector mud-history-max ""))
-    (set (make-local-variable 'mud-input-history-head) 0)
-    (set (make-local-variable 'mud-input-history-tail) 0)
-    (set (make-local-variable 'mud-input-history-current) 0)
-    ;; -----------------------------------------------------
-    
-    ;; Text properties -------------------------------------
-    (set (make-local-variable 'mud-output-text-props)
-         (copy-tree mud-default-output-props))
-
-    (set (make-local-variable 'tab-width) 8)
-    (set (make-local-variable 'default-tab-width) 8)
-    ;; -----------------------------------------------------
-
-
-    ;; Override external variables
-    (set (make-local-variable 'scroll-conservatively) 1000)
-                                        ; set to a high number
-    (buffer-disable-undo) ; undo don't work good
+    (mud-make-local-variables hostname)
 
     ;; Overlay for user input area
     (set (make-local-variable 'mud-input-overlay)
-         (make-overlay (point) (point) mud-buffer nil t))
+         (make-overlay (point) (point) (current-buffer) nil t))
     (overlay-put mud-input-overlay 'field 'mud-input)
     (overlay-put mud-input-overlay 'non-rearsticky t)
     (overlay-put mud-input-overlay 'face "mud-input-area")
