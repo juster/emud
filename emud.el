@@ -104,7 +104,7 @@ settings like triggers, aliases, etc."
     ("47" . (:background ,(nth 7 mud-color-palette)))))
 
 (defvar mud-settings
-  '(( :GLOBAL . (( :triggers . (( "https?://[A-Za-z0-9./?=&;]+" .
+  '(( :GLOBAL . (( :triggers . (( "https?://[A-Za-z0-9./?=&;_]+" .
                                   mud-trigger-url )) )
                  ( :aliases  . () ))
               ))
