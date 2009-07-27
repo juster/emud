@@ -18,7 +18,6 @@ other repetitive commands in MUDs."
   :type  'boolean
   :group 'emud)
 
-
 (defcustom mud-history-max 25
   "How many lines of user input to remember in history"
   :type  'integer
@@ -52,8 +51,7 @@ settings like triggers, aliases, etc."
 (defvar mud-mode-keymap
   (let ((map (make-sparse-keymap)))
     (define-key map "\r"       'mud-input-submit)
-    (define-key map "\C-c\C-p" 'mud-prev-input-history)
-    (define-key map "\C-c\C-n" 'mud-next-input-history)
+    (define-key map "\C-c\C-h" 'emud-send-input-history)
     map))
 
 ; the sticky properties below don't have to do with sticky-input
@@ -62,7 +60,7 @@ settings like triggers, aliases, etc."
 
 ; ANSI color palette
 (defvar mud-color-palette
-  '(("black"       "grey10"  "gray20"  ) ; 0
+  '(("black"       "grey10"  "gray20"  )   ; 0
     ("red5"        "red2"    "red1"    )
     ("green4"      "green2"  "green1"  )
     ("yellow3"     "yellow2" "yellow1" )
@@ -136,6 +134,10 @@ filter.  This is useful if the data the filter is parsing is
 split across two socket receives.  For this reason filters must
 return a nil value.")
 
+(defvar mud-input-history-active nil
+  "A global variable to hold our buffer local input history so
+the minibuffer has access to it")
+
 
 ;; FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -176,12 +178,7 @@ return a nil value.")
 ;;  (message "DEBUG: mud-active-triggers = %s" mud-active-triggers)
 
   ;; Input History ---------------------------------------
-  (set (make-local-variable 'mud-color-leftover) nil)
-  (set (make-local-variable 'mud-input-history)
-       (make-vector mud-history-max ""))
-  (set (make-local-variable 'mud-input-history-head) 0)
-  (set (make-local-variable 'mud-input-history-tail) 0)
-  (set (make-local-variable 'mud-input-history-current) 0)
+  (set (make-local-variable 'mud-input-history) '())
   ;; -----------------------------------------------------
     
   ;; Text properties -------------------------------------
@@ -247,6 +244,33 @@ return a nil value.")
     (goto-char (process-mark mud-net-process))
     (insert-before-markers
      (apply 'propertize output mud-output-text-props))))
+
+
+;; COMMANDS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun mud-input-history-exit ()
+  (setq mud-input-history-active nil)
+  (remove-hook 'minibuffer-exit-hook 'mud-input-history-exit))
+
+(defun emud-send-input-history (send-history)
+  (interactive
+   (if mud-input-history-active
+       (error "Cannot browse input history in two frames at once")
+     (progn
+       (setq mud-input-history-active mud-input-history)
+       (add-hook 'minibuffer-exit-hook 'mud-input-history-exit)
+       (list
+        (read-from-minibuffer "Resend: " (car mud-input-history-active) nil nil
+                              '(mud-input-history-active . 1))))))
+  (mud-set-input-area send-history)
+  (mud-input-submit))
+
+(defun emud-add-trigger (hostname regexp action)
+  (interactive
+   (list
+    (read-from-minibuffer (format "MUD hostname (default %s):" mud-host-name))
+    (read-from-minibuffer "Trigger Regexp:"))))
 
 
 ;; FILTERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -504,11 +528,12 @@ then applied to the entire regexp match.
                               (length trigger-result)))))
 
               ((listp (cdr trigger))
-               (add-text-properties (match-beginning 0) (match-end 0)
+               (add-text-properties (car  orig-match-data)
+                                    (cadr orig-match-data)
                                     (cdr filter)))
 
-              (t (error "Unknown trigger action type for regexp %s"
-                        (car trigger))))))))
+              (t (error "Unknown trigger action type for trigger %s"
+                        trigger)))))))
 
 (defun mud-load-triggers (mud-hostname)
   (let* (( loaded-triggers (if (assoc mud-hostname mud-settings)
@@ -563,6 +588,7 @@ window (firefox)."
 ;; INPUT AREA ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+
 (defun mud-input-echo (on)
   (overlay-put mud-input-overlay 'invisible (if on nil t)))
 
@@ -581,8 +607,8 @@ window (firefox)."
         (mud-input-stick))
 
       ;; Input history stuff
-      (mud-add-input-history user-input))
-    (when mud-input-history-current (setq mud-input-history-current nil))))
+      (setq mud-input-history
+            (add-to-history 'mud-input-history user-input mud-history-max)))))
 
 (defun mud-record-input-area ()
   "Store the user's input area text into the connected buffer."
@@ -645,70 +671,6 @@ window (firefox)."
   (overlay-put mud-input-overlay
                'insert-behind-hooks '(mud-input-sticky-append-hook))
   (setq mud-sticky-input-flag t))
-
-
-;; INPUT HISTORY ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-
-(defun mud-add-input-history (new-input)
-  ;; Add input circularly, move trackers to beginning of vector
-  ;; when the vector is maxed out.
-  (setq mud-input-history-tail (1+ mud-input-history-tail))
-  (when (>= mud-input-history-tail (length mud-input-history))
-    (setq mud-input-history-tail 0))
-  (when (= mud-input-history-tail mud-input-history-head)
-    (setq mud-input-history-head (1+ mud-input-history-head)))
-  (when (>= mud-input-history-head (length mud-input-history))
-    (setq mud-input-history-head 0))
-  (aset mud-input-history mud-input-history-tail new-input))
-  ;;(message "DEBUG: %s" mud-input-history))
-  ;;(message "DEBUG: head=%d tail=%d" mud-input-history-head mud-input-history-tail))
-
-(defun mud-clear-input-history ()
-  (interactive)
-  (setq mud-input-history (make-vector mud-history-max ""))
-  (setq mud-input-history-head 0)
-  (setq mud-input-history-tail 0)
-  (setq mud-input-history-current 0))
-
-(defun mud-prev-input-history ()
-  (interactive)
-  (catch 'history-limit
-    (if (null mud-input-history-current)
-        (setq mud-input-history-current mud-input-history-tail)
-      (progn
-        ;; check if we are at the beginning limit
-        (when (= mud-input-history-current mud-input-history-head)
-          (message "Beginning of input history reached.")
-          (throw 'history-limit nil))
-        (setq mud-input-history-current (1- mud-input-history-current))
-        ;; wrap around to the vector's end
-        (when (< mud-input-history-current 0)
-          (setq mud-input-history-current (1- (length mud-input-history))))))
-    (mud-set-input-area (aref mud-input-history mud-input-history-current))
-    (when mud-sticky-input (mud-input-stick))
-    (goto-char (overlay-end mud-input-overlay))))
-
-(defun mud-next-input-history ()
-  (interactive)
-  (when (catch 'history-limit
-          (when (null mud-input-history-current)
-            (throw 'history-limit t))
-          ;; check if we are at the end of the input history
-          (when (= mud-input-history-current mud-input-history-tail)
-            (throw 'history-limit t))
-          (setq mud-input-history-current (1+ mud-input-history-current))
-          ;; wrap around to the vector's beginning
-          (when (>= mud-input-history-current (length mud-input-history))
-            (setq mud-input-history-current 0))
-          (mud-set-input-area (aref
-                               mud-input-history
-                               mud-input-history-current))
-          (when mud-sticky-input (mud-input-stick))
-          (goto-char (overlay-end mud-input-overlay))
-          nil) ; so message is not printed
-    (message "End of input history reached.")))
 
 
 ;; MUD SETTINGS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
