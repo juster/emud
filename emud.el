@@ -126,15 +126,127 @@ No arguments are passed, instead the filter modifies the
 recv-data variable in place.
 
 Server filters search for regular expressions in the output
-received from the MUD server and change the text in place.  After
+received from the MUD server and remove the text in place.  After
 the filter runs the output is passed to the next filter.  After
 all filters are checked, the output is written to the buffer.
 
 Filters can throw a 'filter-resume symbol to abort filtering and
 have the server's next output sent straight to the throwing
 filter.  This is useful if the data the filter is parsing is
-split across two socket receives.  The argument to the throw must
-be the string to prepend to the next recieved text.")
+split across two socket receives.  For this reason filters must
+return a nil value.")
+
+
+;; FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+(defun mud-mode ()
+  "Major mode for playing MUDs"
+  (interactive)
+  (unless (eq major-mode 'mud-mode) (kill-all-local-variables))
+  (use-local-map mud-mode-keymap)
+  (setq mode-name "MUD")
+  (setq major-mode 'mud-mode))
+
+;; (defun mud-vt100-find-end (recv-string &optional x)
+;;   (when (null x) (setq x 0))
+;;   (if (>= x (length recv-string)) nil
+;;     (if (char-equal ?m (aref recv-string x)) x
+;;       (mud-vt100-find-end recv-string (+ x 1)))))
+
+
+(defun mud-sentinel (mud-process event)
+  (when (buffer-name (process-buffer mud-process))
+    (with-current-buffer (process-buffer mud-process)
+      (mud-client-message (replace-regexp-in-string "\n+$" "" event)))))
+
+(defun mud-make-local-variables (hostname)
+  (set (make-local-variable 'mud-host-name) hostname)
+  (set (make-local-variable 'debug-on-error) 1)
+  (set (make-local-variable 'mud-net-process)
+       (get-buffer-process (current-buffer)))
+  (set (make-local-variable 'mud-sticky-input-flag) nil)
+  (set (make-local-variable 'mud-filter-continuation) nil)
+  (set (make-local-variable 'mud-color-intensity) 1)
+  (set (make-local-variable 'mud-local-echo) t)
+  (set (make-local-variable 'mud-active-triggers)
+       (mud-load-triggers hostname))
+
+;;  (message "DEBUG: mud-active-triggers = %s" mud-active-triggers)
+
+  ;; Input History ---------------------------------------
+  (set (make-local-variable 'mud-color-leftover) nil)
+  (set (make-local-variable 'mud-input-history)
+       (make-vector mud-history-max ""))
+  (set (make-local-variable 'mud-input-history-head) 0)
+  (set (make-local-variable 'mud-input-history-tail) 0)
+  (set (make-local-variable 'mud-input-history-current) 0)
+  ;; -----------------------------------------------------
+    
+  ;; Text properties -------------------------------------
+  (set (make-local-variable 'mud-output-text-props)
+       (copy-tree mud-default-output-props))
+
+  (set (make-local-variable 'tab-width) 8)
+  (set (make-local-variable 'default-tab-width) 8)
+  ;; -----------------------------------------------------
+
+
+  ;; Override external variables
+  (set (make-local-variable 'scroll-conservatively) 1000)
+                                        ; set to a high number
+  (buffer-disable-undo))                ; undo don't work good
+
+(defun mud-connect (hostname port)
+  (interactive "sHostname: \nnPort: ")
+
+  (let* (( mud-name    (format "%s:%d" hostname port) )
+         ( mud-buffer  (generate-new-buffer mud-name) )
+         ( mud-process (make-network-process
+                        :name             mud-name
+                        :host             hostname
+                        :service          port
+                        :coding           'raw-text
+                        :buffer           mud-buffer
+                        :filter           'mud-filter
+                        :filter-multibyte t
+                        :sentinel         'mud-sentinel)) )
+
+    (set-buffer mud-buffer)
+    (let ( (default-major-mode 'mud-mode) )
+      (set-buffer-major-mode mud-buffer))
+    (mud-make-local-variables hostname)
+
+    ;; Overlay for user input area
+    (set (make-local-variable 'mud-input-overlay)
+         (make-overlay (point) (point) (current-buffer) nil t))
+    (overlay-put mud-input-overlay 'field 'mud-input)
+    (overlay-put mud-input-overlay 'non-rearsticky t)
+    (overlay-put mud-input-overlay 'face "mud-input-area")
+    (overlay-put mud-input-overlay 'invisible nil)
+
+    (set-window-buffer (selected-window) mud-buffer)))
+
+(defun mud-client-message (message)
+  "Send a message to the user from the MUD client."
+  (save-excursion
+    (goto-char (process-mark mud-net-process))
+    (insert-before-markers
+     (let (( prop-list mud-output-text-props ))
+       (plist-put prop-list 'face "mud-client-message")
+;;        (plist-put prop-list 'rear-sticky nil)
+;;        (plist-put prop-list 'front-sticky nil)
+       (apply 'propertize (format "*EMUD* says: \"%s\"\n" message)
+              prop-list)))))
+
+
+(defun mud-append-server-output (output)
+  "Append text from the server before the input area."
+  (save-excursion
+    (goto-char (process-mark mud-net-process))
+    (insert-before-markers
+     (apply 'propertize output mud-output-text-props))))
 
 
 ;; FILTERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -448,117 +560,6 @@ window (firefox)."
     (browse-url url)))
 
 
-;; FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-
-(defun mud-mode ()
-  "Major mode for playing MUDs"
-  (interactive)
-  (unless (eq major-mode 'mud-mode) (kill-all-local-variables))
-  (use-local-map mud-mode-keymap)
-  (setq mode-name "MUD")
-  (setq major-mode 'mud-mode))
-
-;; (defun mud-vt100-find-end (recv-string &optional x)
-;;   (when (null x) (setq x 0))
-;;   (if (>= x (length recv-string)) nil
-;;     (if (char-equal ?m (aref recv-string x)) x
-;;       (mud-vt100-find-end recv-string (+ x 1)))))
-
-
-(defun mud-sentinel (mud-process event)
-  (when (buffer-name (process-buffer mud-process))
-    (with-current-buffer (process-buffer mud-process)
-      (mud-client-message (replace-regexp-in-string "\n+$" "" event)))))
-
-(defun mud-make-local-variables (hostname)
-  (set (make-local-variable 'mud-host-name) hostname)
-  (set (make-local-variable 'debug-on-error) 1)
-  (set (make-local-variable 'mud-net-process)
-       (get-buffer-process (current-buffer)))
-  (set (make-local-variable 'mud-sticky-input-flag) nil)
-  (set (make-local-variable 'mud-filter-continuation) nil)
-  (set (make-local-variable 'mud-color-intensity) 1)
-  (set (make-local-variable 'mud-local-echo) t)
-  (set (make-local-variable 'mud-active-triggers)
-       (mud-load-triggers hostname))
-
-;;  (message "DEBUG: mud-active-triggers = %s" mud-active-triggers)
-
-  ;; Input History ---------------------------------------
-  (set (make-local-variable 'mud-color-leftover) nil)
-  (set (make-local-variable 'mud-input-history)
-       (make-vector mud-history-max ""))
-  (set (make-local-variable 'mud-input-history-head) 0)
-  (set (make-local-variable 'mud-input-history-tail) 0)
-  (set (make-local-variable 'mud-input-history-current) 0)
-  ;; -----------------------------------------------------
-    
-  ;; Text properties -------------------------------------
-  (set (make-local-variable 'mud-output-text-props)
-       (copy-tree mud-default-output-props))
-
-  (set (make-local-variable 'tab-width) 8)
-  (set (make-local-variable 'default-tab-width) 8)
-  ;; -----------------------------------------------------
-
-
-  ;; Override external variables
-  (set (make-local-variable 'scroll-conservatively) 1000)
-                                        ; set to a high number
-  (buffer-disable-undo))                ; undo don't work good
-
-(defun mud-connect (hostname port)
-  (interactive "sHostname: \nnPort: ")
-
-  (let* (( mud-name    (format "%s:%d" hostname port) )
-         ( mud-buffer  (generate-new-buffer mud-name) )
-         ( mud-process (make-network-process
-                        :name             mud-name
-                        :host             hostname
-                        :service          port
-                        :coding           'raw-text
-                        :buffer           mud-buffer
-                        :filter           'mud-filter
-                        :filter-multibyte t
-                        :sentinel         'mud-sentinel)) )
-
-    (set-buffer mud-buffer)
-    (let ( (default-major-mode 'mud-mode) )
-      (set-buffer-major-mode mud-buffer))
-    (mud-make-local-variables hostname)
-
-    ;; Overlay for user input area
-    (set (make-local-variable 'mud-input-overlay)
-         (make-overlay (point) (point) (current-buffer) nil t))
-    (overlay-put mud-input-overlay 'field 'mud-input)
-    (overlay-put mud-input-overlay 'non-rearsticky t)
-    (overlay-put mud-input-overlay 'face "mud-input-area")
-    (overlay-put mud-input-overlay 'invisible nil)
-
-    (set-window-buffer (selected-window) mud-buffer)))
-
-(defun mud-client-message (message)
-  "Send a message to the user from the MUD client."
-  (save-excursion
-    (goto-char (process-mark mud-net-process))
-    (insert-before-markers
-     (let (( prop-list mud-output-text-props ))
-       (plist-put prop-list 'face "mud-client-message")
-;;        (plist-put prop-list 'rear-sticky nil)
-;;        (plist-put prop-list 'front-sticky nil)
-       (apply 'propertize (format "*EMUD* says: \"%s\"\n" message)
-              prop-list)))))
-
-
-(defun mud-append-server-output (output)
-  "Append text from the server before the input area."
-  (save-excursion
-    (goto-char (process-mark mud-net-process))
-    (insert-before-markers
-     (apply 'propertize output mud-output-text-props))))
-
 ;; INPUT AREA ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -622,6 +623,7 @@ window (firefox)."
 ;; STICKY INPUT ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+
 (defun mud-input-sticky-off ()
   (overlay-put mud-input-overlay 'modification-hooks nil)
   (overlay-put mud-input-overlay 'insert-behind-hooks nil)
@@ -644,8 +646,10 @@ window (firefox)."
                'insert-behind-hooks '(mud-input-sticky-append-hook))
   (setq mud-sticky-input-flag t))
 
+
 ;; INPUT HISTORY ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 
 (defun mud-add-input-history (new-input)
   ;; Add input circularly, move trackers to beginning of vector
@@ -706,8 +710,10 @@ window (firefox)."
           nil) ; so message is not printed
     (message "End of input history reached.")))
 
+
 ;; MUD SETTINGS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 
 (defun load-mud-settings ()
   (when (file-exists-p mud-settings-file)
