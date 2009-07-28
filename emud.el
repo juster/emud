@@ -476,11 +476,7 @@ The new colors are stored in `mud-output-text-props'."
   "Create a list of matched regexps, if any.  Checks each regexp.
 
 FILTER-LIST is a list of filter pairs: ( REGEXP . FUNCTION ).
-The idea being, if RJuanKa leaves west.
-JuanKa arrives.
-Dayman leaves east.
-Dayman arrives.
-EGEXP matches, FUNCTION is called.
+The idea being, if REGEXP matches, FUNCTION is called.
 
 A list of matches is returned in a special format.  The filter
 is appended with the match data, as from `match-data'.
