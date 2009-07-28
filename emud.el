@@ -138,6 +138,17 @@ return a nil value.")
   "A global variable to hold our buffer local input history so
 the minibuffer has access to it")
 
+(defmacro read-from-minibuffer-default (prompt default)
+  `(if (boundp ,default)
+       (let ( minibuffer-input )
+         (setq minibuffer-input
+               (read-from-minibuffer (concat ,prompt
+                                             (format " (default %s): "
+                                                     (symbol-value ,default)))))
+         (if (= 0 (length minibuffer-input))
+             (symbol-value ,default) minibuffer-input))
+     (read-from-minibuffer (concat ,prompt ": "))))
+                                     
 
 ;; FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -172,8 +183,8 @@ the minibuffer has access to it")
   (set (make-local-variable 'mud-filter-continuation) nil)
   (set (make-local-variable 'mud-color-intensity) 1)
   (set (make-local-variable 'mud-local-echo) t)
-  (set (make-local-variable 'mud-active-triggers)
-       (mud-load-triggers hostname))
+  (make-local-variable 'mud-cached-triggers)
+  (make-local-variable 'mud-cached-aliases)
 
 ;;  (message "DEBUG: mud-active-triggers = %s" mud-active-triggers)
 
@@ -195,35 +206,6 @@ the minibuffer has access to it")
                                         ; set to a high number
   (buffer-disable-undo))                ; undo don't work good
 
-(defun mud-connect (hostname port)
-  (interactive "sHostname: \nnPort: ")
-
-  (let* (( mud-name    (format "%s:%d" hostname port) )
-         ( mud-buffer  (generate-new-buffer mud-name) )
-         ( mud-process (make-network-process
-                        :name             mud-name
-                        :host             hostname
-                        :service          port
-                        :coding           'raw-text
-                        :buffer           mud-buffer
-                        :filter           'mud-filter
-                        :filter-multibyte t
-                        :sentinel         'mud-sentinel)) )
-
-    (set-buffer mud-buffer)
-    (let ( (default-major-mode 'mud-mode) )
-      (set-buffer-major-mode mud-buffer))
-    (mud-make-local-variables hostname)
-
-    ;; Overlay for user input area
-    (set (make-local-variable 'mud-input-overlay)
-         (make-overlay (point) (point) (current-buffer) nil t))
-    (overlay-put mud-input-overlay 'field 'mud-input)
-    (overlay-put mud-input-overlay 'non-rearsticky t)
-    (overlay-put mud-input-overlay 'face "mud-input-area")
-    (overlay-put mud-input-overlay 'invisible nil)
-
-    (set-window-buffer (selected-window) mud-buffer)))
 
 (defun mud-client-message (message)
   "Send a message to the user from the MUD client."
@@ -249,6 +231,37 @@ the minibuffer has access to it")
 ;; COMMANDS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(defun emud-connect (hostname port)
+  (interactive "sHostname: \nnPort: ")
+
+  (let* (( mud-name    (format "%s:%d" hostname port) )
+         ( mud-buffer  (generate-new-buffer mud-name) )
+         ( mud-process (make-network-process
+                        :name             mud-name
+                        :host             hostname
+                        :service          port
+                        :coding           'raw-text
+                        :buffer           mud-buffer
+                        :filter           'mud-filter
+                        :filter-multibyte t
+                        :sentinel         'mud-sentinel)) )
+
+    (set-buffer mud-buffer)
+    (let ( (default-major-mode 'mud-mode) )
+      (set-buffer-major-mode mud-buffer))
+    (mud-make-local-variables hostname)
+    (cache-mud-settings hostname)
+
+    ;; Overlay for user input area
+    (set (make-local-variable 'mud-input-overlay)
+         (make-overlay (point) (point) (current-buffer) nil t))
+    (overlay-put mud-input-overlay 'field 'mud-input)
+    (overlay-put mud-input-overlay 'non-rearsticky t)
+    (overlay-put mud-input-overlay 'face "mud-input-area")
+    (overlay-put mud-input-overlay 'invisible nil)
+
+    (set-window-buffer (selected-window) mud-buffer)))
+
 (defun mud-input-history-exit ()
   (setq mud-input-history-active nil)
   (remove-hook 'minibuffer-exit-hook 'mud-input-history-exit))
@@ -266,11 +279,36 @@ the minibuffer has access to it")
   (mud-set-input-area send-history)
   (mud-input-submit))
 
-(defun emud-add-trigger (hostname regexp action)
+(defun emud-add-trigger (hostname regexp color)
   (interactive
    (list
-    (read-from-minibuffer (format "MUD hostname (default %s):" mud-host-name))
-    (read-from-minibuffer "Trigger Regexp:"))))
+    (read-from-minibuffer-default "MUD hostname" 'mud-host-name)
+    (read-from-minibuffer "Trigger Pattern: ")
+    (read-from-minibuffer "Trigger Color: ")))
+
+  (unless (> (length hostname) 0)
+    (error "You must specify a hostname to apply the filter to"))
+  (unless (> (length regexp) 0)
+    (error "You must specify a pattern the trigger should respond to"))
+  (unless (> (length color) 0)
+    (error "You must specify a valid color"))
+
+  (let (mud-host-settings host-triggers)
+    (setq mud-host-settings (get-settings-for-mud hostname))
+    (setq host-triggers (cdr (assoc :triggers mud-host-settings)))
+    (message "DEBUG: host-triggers = %s" host-triggers)
+
+    (if (assoc regexp host-triggers)
+        (progn
+          (message "DEBUG: replacing existing trigger!")
+          (setcdr (assoc regexp host-triggers) (list :foreground color)))
+      (setcdr (assoc :triggers mud-host-settings)
+              (cons (cons regexp (list :foreground color))
+                    host-triggers))))
+
+  (when (string= mud-host-name hostname)
+    (cache-mud-settings hostname :triggers))
+  (save-mud-settings))
 
 
 ;; FILTERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -500,10 +538,10 @@ The function must return the new string to replace the match with.
 Otherwise, the action is assumed to be text properties which are
 then applied to the entire regexp match.
 "
-;;  (message "DEBUG: mud-active-triggers = %s" mud-active-triggers)
+  ;;  (message "DEBUG: mud-cached-triggers = %s" mud-cached-triggers)
 
   (let (( pos 0 ))
-    (dolist (trigger mud-active-triggers)
+    (dolist (trigger mud-cached-triggers)
       (while (string-match (car trigger) recv-data pos)
         (cond ((symbolp (cdr trigger)) ; trigger is a symbol or lambda
                (let ( trigger-result   ; hopefully a function...
@@ -525,36 +563,18 @@ then applied to the entire regexp match.
                    (setq recv-data
                          (replace-match trigger-result t nil recv-data)))
                  (setq pos (+ (car orig-match-data)
-                              (length trigger-result)))))
-
+                     (length trigger-result)))))
+               
               ((listp (cdr trigger))
-               (add-text-properties (car  orig-match-data)
-                                    (cadr orig-match-data)
-                                    (cdr filter)))
+               (let (( inhibit-read-only t ))
+                 (add-text-properties (match-beginning 0)
+                                      (match-end 0)
+                                      (list 'face (cdr trigger))
+                                      recv-data))
+               (setq pos (+ 1 (match-end 0))))
 
               (t (error "Unknown trigger action type for trigger %s"
                         trigger)))))))
-
-(defun mud-load-triggers (mud-hostname)
-  (let* (( loaded-triggers (if (assoc mud-hostname mud-settings)
-                               (copy-tree
-                                (cdr (assoc
-                                      :triggers
-                                      (cdr (assoc mud-hostname mud-settings))
-                                          '(( :triggers . '() )))))
-                             '()) )
-         ( global-triggers
-           (cdr (assoc
-                 :triggers
-                 (cdr (assq :GLOBAL mud-settings)))) ))
-
-;;    (message "DEBUG: loaded-triggers = %s\nDEBUG: global-triggers = %s"
-;;             loaded-triggers global-triggers)
-    (dolist (trigger-pair global-triggers)
-      (unless (assoc (car trigger-pair) loaded-triggers)
-        (setq loaded-triggers (cons trigger-pair loaded-triggers))))
-    loaded-triggers))
-
 
 ;; BUILTIN TRIGGERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -668,6 +688,7 @@ window (firefox)."
 (defun mud-input-stick ()
   (overlay-put mud-input-overlay
                'modification-hooks '(mud-input-sticky-edit-hook))
+
   (overlay-put mud-input-overlay
                'insert-behind-hooks '(mud-input-sticky-append-hook))
   (setq mud-sticky-input-flag t))
@@ -676,6 +697,43 @@ window (firefox)."
 ;; MUD SETTINGS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+
+(defun get-settings-for-mud (hostname)
+  "Retrieves the settings alist for HOSTNAME.  If the hostname is
+not in the `mud-settings' alist, creates an entry for it."
+;;  (load-mud-settings)
+  (unless (assoc hostname mud-settings)
+    (setq mud-settings
+          (cons `(,hostname . ((:triggers . ())
+                               (:aliases  . ())))
+                mud-settings)))
+
+  (cdr (assoc hostname mud-settings)))
+
+
+(defun cache-mud-settings (mud-hostname &optional setting-type)
+  (if (not setting-type)
+      (progn
+        (cache-mud-settings mud-hostname :triggers)
+        (cache-mud-settings mud-hostname :aliases))
+
+    (let (loaded-settings global-settings)
+      (setq loaded-settings (cdr (assoc setting-type
+                                        (get-settings-for-mud mud-hostname))))
+      (setq global-settings (cdr (assoc setting-type
+                                        (cdr (assq :GLOBAL mud-settings)))))
+;;       (message "DEBUG: loaded-settings = %s\nDEBUG: global-settings = %s"
+;;                loaded-settings global-settings)
+      (dolist (setting-pair global-settings)
+        (unless (assoc (car setting-pair) loaded-settings)
+          (setq loaded-settings (cons setting-pair loaded-settings))))
+
+      (cond ((eq setting-type :triggers)
+             (setq mud-cached-triggers loaded-settings))
+            ((eq setting-type :aliases)
+             (setq mud-cached-aliases loaded-settings)))
+
+      loaded-settings)))
 
 (defun load-mud-settings ()
   (when (file-exists-p mud-settings-file)
@@ -694,6 +752,96 @@ window (firefox)."
     (with-current-buffer settings-buffer
       (write-file mud-settings-file))
     (kill-buffer settings-buffer)))
+
+
+;; MUD CONFIG BUFFER ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+(defun emud-config (host-name)
+  (interactive
+   (list
+    (if (boundp 'mud-host-name) mud-host-name
+      (read-from-minibuffer "MUD hostname: "))))
+  
+  (let ( emud-config-buffer )
+    (setq emud-config-buffer (get-buffer-create "*EMUD Config*"))
+    (pop-to-buffer emud-config-buffer t)
+    (set (make-local-variable 'mud-config-host-name) host-name)
+    (let (( default-major-mode 'emud-config-mode ))
+      (set-buffer-major-mode emud-config-buffer))))
+
+(defun emud-config-mode ()
+  "Major mode editing EMUD settings like triggers and aliases."
+  (interactive)
+;;  (unless (eq major-mode 'emud-config-mode) (kill-all-local-variables))
+;;  (use-local-map emud-config-mode-keymap)
+  (setq mode-name "EMUD Config")
+  (setq major-mode 'emud-config-mode)
+  (emud-config-draw)
+  (use-local-map widget-keymap))
+
+(defun emud-config-save ()
+  )
+
+(defun emud-config-draw ()
+  (require 'widget)
+  (require 'wid-edit)
+  (setq buffer-read-only nil)
+  (let (( inhibit-read-only t))
+    (erase-buffer))
+  (let (mud-cfg triggers)
+    (setq mud-cfg (get-settings-for-mud mud-config-host-name))
+    (setq triggers (cdr (assq :triggers mud-cfg)))
+    (widget-insert "==================================[ TRIGGERS ]================================\n")
+
+    (if (= 0 (length triggers))
+        (widget-insert " *EMPTY*\n")
+      (dotimes (i (length triggers))
+        (let (( trigger (elt triggers i) ))
+          (widget-create
+           'editable-field
+           :tag "Match"
+           :size 78
+           :value (car trigger))
+
+          (widget-insert "\n")
+
+          (widget-create
+           'menu-choice
+           :indent 7
+           :tag "Action"
+           :choice "Color"
+           ;;              :choice (cond ((symbolp (cdr trigger)) "Function")
+           ;;                            ((listp   (cdr trigger))
+           ;;                             (propertize "Color" 'face (cdr trigger)))
+           ;;                            (t        "ERROR!"))
+
+           `(checklist
+             :indent 23
+             :tag "Color"
+             :format "%t (%{sample%}) %v"
+             :sample-face ,(if (listp (cdr trigger))
+                               (cdr trigger)
+                             '())
+             (editable-field
+              :tag "Foreground"
+              :format "%t: %v\n"
+              :size 10)
+             (editable-field
+              :tag "Background"
+              :format "%t: %v\n"
+              :size 10))
+           '(editable-field
+             :tag "Response"
+             :format "%t %v\n"
+             :size 61)
+           '(choice-item "Function"))))))
+
+  (widget-insert "==================================[ TRIGGERS ]================================\n")
+  (widget-setup))
+
+(load-mud-settings)
 
 (provide 'emud)
 
