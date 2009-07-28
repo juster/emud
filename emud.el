@@ -1,6 +1,56 @@
 ;; Emacs MUD Client
-;; emud.el - 07/22/08
 ;; by Justin Davis < jrcd83 ATAT gmail >
+;;
+;;
+;;
+;; This source file is seperated into the following sections:
+;;
+;; * CUSTOMIZE
+;; Customizations for things like font faces and simple settings that
+;; effect all emud sessions
+;;
+;; * VARIABLES
+;; Global variables used by every emud session
+;;
+;; * FUNCTIONS
+;; Simple functions that don't belong anywhere else, like emud-mode for
+;; example
+;;
+;; * COMMANDS
+;; Commands that are user-accessible and mostly considered the public
+;; interface.  Commands start with "emud-".
+;;
+;; * FILTERS
+;; Filters are internally used by emud to extract stateful protocol
+;; information like VT100 color codes and Telnet protocol codes.  The
+;; codes are also removed from the mud server's output.
+;;
+;; * TRIGGERS
+;; Triggers, like with most mud clients.  Triggers respond to a matching
+;; regexp with some sort of action, like coloring, sending the mud server
+;; some input, or a lambda function.
+;;
+;; * INPUT AREA
+;; The input area is where the user types in their input before sending
+;; it to the mud server.  The input area keeps mud output from mixing
+;; with the user's input before they are ready to send it.
+;;
+;; ** STICKY INPUT
+;; A common feature with mud clients, sticky input keeps the last line of
+;; input around in case the user wants to send it again.  Then they only
+;; have to press ENTER if they do.
+;;
+;; * MUD SETTINGS
+;; This is a vague name that means settings that are mud-specific.
+;; Things like triggers, aliases, variables, maps, etc.  Because these
+;; are not global across all emud sessions, they are stored in a seperate
+;; file.  This file is ~/.emudrc by default but can be customized.
+;;
+;; ** MUD CONFIG BUFFER
+;; The mud config buffer aims to be like configuring variables.  Using
+;; widgets you should be able to easily add, edit, and delete settings
+;; like triggers, aliases, etc.
+;;
 
 
 ;; CUSTOMIZE ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
