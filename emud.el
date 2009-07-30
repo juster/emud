@@ -102,6 +102,7 @@ settings like triggers, aliases, etc."
   (let ((map (make-sparse-keymap)))
     (define-key map "\r"       'mud-input-submit)
     (define-key map "\C-c\C-h" 'emud-send-input-history)
+    (define-key map "\d"       'mud-sticky-backspace)
     map))
 
 ; the sticky properties below don't have to do with sticky-input
@@ -359,6 +360,15 @@ the minibuffer has access to it")
   (when (string= mud-host-name hostname)
     (cache-mud-settings hostname :triggers))
   (save-mud-settings))
+
+(defun mud-sticky-backspace (arg &optional killp)
+  (interactive "*p\nP")
+;;   (message "DEBUG: mud-sticky-backspace")
+  (if mud-sticky-input-flag
+      (progn
+        (mud-set-input-area "")
+        (mud-input-sticky-off))
+    (backward-delete-char-untabify arg killp)))
 
 
 ;; FILTERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
