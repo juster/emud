@@ -363,7 +363,6 @@ the minibuffer has access to it")
 
 (defun mud-sticky-backspace (arg &optional killp)
   (interactive "*p\nP")
-;;   (message "DEBUG: mud-sticky-backspace")
   (if mud-sticky-input-flag
       (progn
         (mud-set-input-area "")
