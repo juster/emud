@@ -588,7 +588,8 @@ then applied to the entire regexp match.
 
   (let (( pos 0 ))
     (dolist (trigger mud-cached-triggers)
-      (while (string-match (car trigger) recv-data pos)
+      (while (and (< pos (length recv-data))
+                     (string-match (car trigger) recv-data pos))
         (cond ((symbolp (cdr trigger)) ; trigger is a symbol or lambda
                (let ( trigger-result   ; hopefully a function...
                       orig-match-data
@@ -617,7 +618,7 @@ then applied to the entire regexp match.
                                       (match-end 0)
                                       (list 'face (cdr trigger))
                                       recv-data))
-               (setq pos (+ 1 (match-end 0))))
+               (setq pos (1+ (match-end 0))))
 
               (t (error "Unknown trigger action type for trigger %s"
                         trigger)))))))
