@@ -47,7 +47,7 @@
 ;; file.  This file is ~/.emudrc by default but can be customized.
 ;;
 ;; ** MUD CONFIG BUFFER
-;; The mud config buffer aims to be like configuring variables.  Using
+;; The mud config buffer aims to be like customizing in Emacs.  Using
 ;; widgets you should be able to easily add, edit, and delete settings
 ;; like triggers, aliases, etc.
 ;;
@@ -199,7 +199,9 @@ the minibuffer has access to it")
          (if (= 0 (length minibuffer-input))
              (symbol-value ,default) minibuffer-input))
      (read-from-minibuffer (concat ,prompt ": "))))
-                                     
+
+(defvar mud-active-buffers '()
+  "A list of currently active MUD sessions/buffers")
 
 ;; FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -222,6 +224,9 @@ the minibuffer has access to it")
 
 (defun mud-sentinel (mud-process event)
   (when (buffer-name (process-buffer mud-process))
+    ;; If we are disconnected, remove buffer from active buffers list
+    (when (string= event "connection reset by peer")
+      (delq (process-buffer) mud-active-buffers))
     (with-current-buffer (process-buffer mud-process)
       (mud-client-message (replace-regexp-in-string "\n+$" "" event)))))
 
@@ -282,6 +287,7 @@ the minibuffer has access to it")
 ;; COMMANDS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+
 (defun emud-connect (hostname port)
   (interactive "sHostname: \nnPort: ")
 
@@ -310,6 +316,8 @@ the minibuffer has access to it")
     (overlay-put mud-input-overlay 'non-rearsticky t)
     (overlay-put mud-input-overlay 'face "mud-input-area")
     (overlay-put mud-input-overlay 'invisible nil)
+
+    (setq mud-active-buffers (cons mud-buffer mud-active-buffers))
 
     (set-window-buffer (selected-window) mud-buffer)))
 
@@ -722,6 +730,7 @@ window (firefox)."
   (and (>= (point) (overlay-start mud-input-overlay))
        (<= (point) (overlay-end mud-input-overlay))))
 
+
 ;; STICKY INPUT ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -766,16 +775,25 @@ not in the `mud-settings' alist, creates an entry for it."
 
   (cdr (assoc hostname mud-settings)))
 
+(defun force-mud-settings-refresh (hostname &optional settings-type)
+  (dolist (buffer-to-check mud-active-buffers)
+    (with-current-buffer buffer-to-check
+      (if (string= mud-host-name hostname)
+          (cache-mud-settings hostname settings-type)))))
 
-(defun cache-mud-settings (mud-hostname &optional setting-type)
+(defun cache-mud-settings (hostname &optional setting-type)
+  "Caches the mud settings for the given HOSTNAME into the mud
+session's active buffer as a buffer local variable.  Resolves
+host specific and global settings, with host specific settings
+overriding global settings."
   (if (not setting-type)
       (progn
-        (cache-mud-settings mud-hostname :triggers)
-        (cache-mud-settings mud-hostname :aliases))
+        (cache-mud-settings hostname :triggers)
+        (cache-mud-settings hostname :aliases))
 
     (let (loaded-settings global-settings)
       (setq loaded-settings (cdr (assoc setting-type
-                                        (get-settings-for-mud mud-hostname))))
+                                        (get-settings-for-mud hostname))))
       (setq global-settings (cdr (assoc setting-type
                                         (cdr (assq :GLOBAL mud-settings)))))
 ;;       (message "DEBUG: loaded-settings = %s\nDEBUG: global-settings = %s"
