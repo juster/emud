@@ -2,7 +2,6 @@
 ;; by Justin Davis < jrcd83 ATAT gmail >
 ;;
 ;;
-;;
 ;; This source file is seperated into the following sections:
 ;;
 ;; * CUSTOMIZE
@@ -153,7 +152,7 @@ settings like triggers, aliases, etc."
     ("47" . (:background ,(nth 7 mud-color-palette)))))
 
 (defvar mud-settings
-  '(( :GLOBAL . (( :triggers . (( "https?://[A-Za-z0-9./?=&;_]+" .
+  '(( :GLOBAL . (( :triggers . (( "https?://[A-Za-z0-9./?=&;~_%-]+" .
                                   mud-trigger-url )) )
                  ( :aliases  . () ))
               ))
@@ -485,7 +484,7 @@ The new colors are stored in `mud-output-text-props'."
       ;; (it was split between two sends/recvs)
       (throw 'mud-filter-continue t))))
 
-(defun mud-filter-result-sort (left right)
+(defun mud-filter-match-sort (left right)
 ;;  (message "DEBUG sorting, left = %s -- right = %s" left right)
   (< (cadr left) (cadr right)))
 
@@ -500,6 +499,10 @@ is appended with the match data, as from `match-data'.
 
 The result is a sorted associated list:
 \( ( FUNCTION-SYMBOL . ( MATCH-DATA ) ), ... )
+
+This is actually the same as a flat list with the function symbol
+as the first element, followed by the match position data:
+\( ( FUNCTION-SYMBOL, MATCH-DATA ), ... )
 "
   (if filter-list
       (let (( filter (car filter-list) ))
@@ -513,23 +516,23 @@ The result is a sorted associated list:
     nil))
 
 (defun mud-filter-helper (pos filter)
-  (let (( match-regexp (cdr (assq (car filter) mud-server-filters)))
-        ( match-list   (cdr filter)))
+  (let (( match-regexp      (cdr (assq (car filter) mud-server-filters)))
+        ( match-positions   (cdr filter)))
     ;; set preceding text to the old text properties
-    (when (< pos (car match-list))
-      (set-text-properties pos (car match-list)
+    (when (< pos (car match-positions))
+      (set-text-properties pos (car match-positions)
                            mud-output-text-props recv-data))
-    (set-match-data match-list)
+    (set-match-data match-positions)
     (when (catch 'mud-filter-continue (funcall (car filter)))
-        ;; If the filter requested a continuation, store its the data.
+        ;; If the filter requested a continuation, store the "old" data.
       (setq mud-filter-continuation
             (substring recv-data pos (length recv-data)))
 ;;      (message "DEBUG: continuation: %s" mud-filter-continuation)
       (setq recv-data (substring recv-data 0 pos))
       (throw 'mud-filter-continue t))
-    (set-match-data match-list)
+    (set-match-data match-positions)
     (setq recv-data (replace-match "" nil t recv-data))
-    (car match-list)))
+    (car match-positions)))
 
 (defun mud-filter (process recv-data)
   "The master mud server output filter for the MUD connection/process.
@@ -546,24 +549,12 @@ Checks all mud server output for any trigger matches after that."
       (setq mud-filter-continuation nil))
 
     (catch 'mud-filter-continue
-      (let (( pos 0 )
-            ( matches (sort (mud-filter-matches mud-server-filters)
-                            'mud-filter-result-sort))
-            ( next-filter nil )
-            ( match-regexp nil ))
-
-        (while (> (length matches) 0)
-;;          (message "DEBUG: matches = %s" matches)
-          (setq next-filter (pop matches))
-          (setq pos (mud-filter-helper pos next-filter))
-          (setq match-regexp (cdr (assq (car next-filter) mud-server-filters)))
-
-          ;; If this same filter matches again, make sure to put
-          ;; it back in the results list, resorted.
-          (when (string-match match-regexp recv-data pos)
-            (setq matches
-                  (sort (cons (cons (car next-filter) (match-data)) matches)
-                        'mud-filter-result-sort))))
+      (let (( pos        0 )
+            ( next-match nil ))
+        (while (setq next-match
+                     (car (sort (mud-filter-matches mud-server-filters)
+                                'mud-filter-match-sort)))
+          (setq pos (mud-filter-helper pos next-match)))
 
         ;; Set the text properties of leftover text after all filters.
         (when (< pos (1- (length recv-data)))
