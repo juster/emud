@@ -282,11 +282,24 @@ the minibuffer has access to it")
     (insert-before-markers
      (apply 'propertize output mud-output-text-props))))
 
+(defun mud-grep-list (test-function grep-list)
+  "Acts like perl's grep builtin.  Passes each element in
+GREP-LIST to TEST-FUNCTION.  Returns a list of every element
+which returned t.  Preserves the original order as well."
+  (let (( result-list '() )
+        ( len          (length grep-list)))
+    ;; Do things backwards because push adds an element to the front.
+    (dotimes (offset-from-end len)
+      (let (element)
+        (setq element (elt grep-list (- len offset-from-end 1)))
+        (when (funcall test-function element)
+          (push result-list element)))))
+  result-list)
 
 ;; COMMANDS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-
+;;;###autoload
 (defun emud-connect (hostname port)
   (interactive "sHostname: \nnPort: ")
 
@@ -764,6 +777,15 @@ window (firefox)."
 ;; MUD SETTINGS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(defun mud-assign-setting (type settings-alist key value)
+  (let (type-alist existing-setting)
+    (setq type-alist       (cdr (assq type settings-alist))
+          existing-setting (assoc key type-alist))
+    (if existing-setting
+        (setcdr existing-setting value)
+      (setcdr (assq type settings-alist)
+              (cons (cons key value) type-alist))))
+  settings-alist)
 
 (defun get-settings-for-mud (hostname)
   "Retrieves the settings alist for HOSTNAME.  If the hostname is
@@ -776,6 +798,15 @@ not in the `mud-settings' alist, creates an entry for it."
                 mud-settings)))
 
   (cdr (assoc hostname mud-settings)))
+
+(defun set-settings-for-mud (hostname new-settings)
+  (if (assoc hostname mud-settings)
+      (setcdr (assoc hostname mud-settings) new-settings)
+    (progn
+      (setq mud-settings
+            (cons (cons hostname new-settings)
+                  mud-settings))
+      (force-mud-settings-refresh hostname))))
 
 (defun force-mud-settings-refresh (hostname &optional settings-type)
   (dolist (buffer-to-check mud-active-buffers)
@@ -824,6 +855,14 @@ overriding global settings."
 
 (defun save-mud-settings ()
   (let* (( settings-buffer (generate-new-buffer "EMUD Settings") ))
+    (setq mud-settings (mud-grep-list
+                        (lambda (elem)
+                          (and (/= 0 (length
+                                      (cdr (assq :triggers elem))))
+                               (/= 0 (length
+                                      (cdr (assq :aliases elem))))))
+                        mud-settings))
+
     (print mud-settings settings-buffer)
     (with-current-buffer settings-buffer
       (write-file mud-settings-file))
@@ -844,6 +883,8 @@ overriding global settings."
     (setq emud-config-buffer (get-buffer-create "*EMUD Config*"))
     (pop-to-buffer emud-config-buffer t)
     (set (make-local-variable 'mud-config-host-name) host-name)
+    (set (make-local-variable 'mud-config-settings)
+         (get-settings-for-mud mud-config-host-name))
     (let (( default-major-mode 'emud-config-mode ))
       (set-buffer-major-mode emud-config-buffer))))
 
