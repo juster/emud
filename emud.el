@@ -330,10 +330,16 @@ the minibuffer has access to it")
        (error "Cannot browse input history in two frames at once")
      (progn
        (setq mud-input-history-active mud-input-history)
+       (add-hook 'minibuffer-setup-hook 'mud-input-history-setup)
        (add-hook 'minibuffer-exit-hook 'mud-input-history-exit)
        (list
-        (read-from-minibuffer "Resend: " (car mud-input-history-active) nil nil
-                              '(mud-input-history-active . 1))))))
+        (completing-read "History: "
+                         mud-input-history-active
+                         nil nil nil
+                         '(mud-input-history-active . 1)
+                         (mud-get-input-area))))))
+;;         (read-from-minibuffer "Resend: " (car mud-input-history-active) nil nil
+;;                               '(mud-input-history-active . 1))))))
   (mud-set-input-area send-history)
   (mud-input-submit))
 
@@ -716,6 +722,11 @@ window (firefox)."
       (insert new-input))
     (when move-to-end
       (goto-char (point-max)))))
+
+(defun mud-get-input-area ()
+  (buffer-substring-no-properties
+   (overlay-start mud-input-overlay)
+   (overlay-end mud-input-overlay)))
 
 (defun mud-inside-input-area-p ()
   (and (>= (point) (overlay-start mud-input-overlay))
