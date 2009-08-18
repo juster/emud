@@ -151,14 +151,38 @@ settings like triggers, aliases, etc."
     ("46" . (:background ,(nth 6 mud-color-palette)))
     ("47" . (:background ,(nth 7 mud-color-palette)))))
 
-(defvar mud-settings
-  '(( :GLOBAL . (( :triggers . (( "https?://[A-Za-z0-9./?=&;~_%-]+" .
-                                  mud-trigger-url )) )
-                 ( :aliases  . () ))
-              ))
-  "Custom mud settings (i.e. triggers, aliases).  The list is
-organized as an alist.  Global settings have the :GLOBAL key,
-mud-specific settings have the mud hostname as the key.")
+(defvar mud-builtin-settings
+  '(( triggers . (( "https?://[A-Za-z0-9./?=&;~_%-]+" .
+                    (:code mud-trigger-url) ))
+               ))
+  "Builtin triggers, and aliases for all sessions.  These cannot be
+edited interactively.")
+
+(defvar mud-global-settings
+  '()
+  "Triggers and aliases that are global.  These settings are
+active for sessions connected to each and every remote host.
+
+\(( 'triggers . ( ... ) ) ( 'aliases  . ( ... ) ))")
+
+(defvar mud-host-settings
+  '()
+  "Triggers and aliases that are mud-specific.  These settings
+are organized as an alist with the mud hostname being the key and
+another alist as the values.  The nested alist has 'triggers,
+'aliases, etc as the keys")
+
+(defvar mud-user-settings
+  '()
+  "Contains the username and passwords for each MUD.  MUD
+hostnames are used as the keys, with another alist of usernames
+as keys, and an alist of mud-settings is the value.  This allows
+different usernames to have custom settings even when playing the
+same MUD.
+
+\( HOSTNAME . (( USERNAME . (( 'password . PASSWORD-TEXT )
+                            ( 'triggers . ... )
+                            ( 'aliases . ... )) )) \)")
 
 (defvar mud-server-filters
   '((mud-color-filter
@@ -379,28 +403,20 @@ which returned t.  Preserves the original order as well."
 
   (let (mud-host-settings host-triggers)
     (setq mud-host-settings (get-settings-for-mud hostname))
-    (setq host-triggers (cdr (assoc :triggers mud-host-settings)))
+    (setq host-triggers (cdr (assoc 'triggers mud-host-settings)))
     (message "DEBUG: host-triggers = %s" host-triggers)
 
     (if (assoc regexp host-triggers)
         (progn
           (message "DEBUG: replacing existing trigger!")
           (setcdr (assoc regexp host-triggers) (list :foreground color)))
-      (setcdr (assoc :triggers mud-host-settings)
+      (setcdr (assoc 'triggers mud-host-settings)
               (cons (cons regexp (list :foreground color))
                     host-triggers))))
 
   (when (string= mud-host-name hostname)
-    (cache-mud-settings hostname :triggers))
+    (cache-mud-settings hostname 'triggers))
   (save-mud-settings))
-
-(defun mud-sticky-backspace (arg &optional killp)
-  (interactive "*p\nP")
-  (if mud-sticky-input-flag
-      (progn
-        (mud-set-input-area "")
-        (mud-input-sticky-off))
-    (backward-delete-char-untabify arg killp)))
 
 
 ;; FILTERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -600,31 +616,39 @@ Checks all mud server output for any trigger matches after that."
 
 
 (defun mud-triggers ()
-  "Check all mud server output for text matching triggers.
+
+  "Check the mud server output for text matching triggers.
 
 This function takes no parameters, but uses the recv-data
 parameter from `mud-filter', where it is called from.
 
-Each trigger is a cons cell with a REGEXP and corresponding action:
-\( REGEXP . ACTION )
+Each trigger is a cons cell with a REGEXP and corresponding actions:
+\( REGEXP . ( :ACTION-TYPE ACTION [ :ACTION-TYPE ACTION ... ] ) )
 
-If the first element of the action is a symbol or lambda the
-ACTION function is evaluated.  Arguments to the ACTION are the matching
-text and the list of match results.  The match results are adjusted
-to be relative to the matching text, NOT the entire recv-data string.
+:ACTION-TYPE can be :color :code :respond or :ignore.  Only one
+of each type can be present.  In this way actions are like
+property lists, but they are presorted by `cache-mud-settings' so
+they are executed in the proper order.
 
-The function must return the new string to replace the match with.
+:font must have a font attribute list as ACTION.
 
-Otherwise, the action is assumed to be text properties which are
-then applied to the entire regexp match.
-"
+:respond must have a string as ACTION
+
+:code must have a list beginning with 'lambda or a symbol to a
+function.  Anything `funcall' can use.  The function must return
+text to replace the matching text with.
+
+:ignore has its ACTION ignored, ironically.  The matching text is
+simply removed."
+
   ;;  (message "DEBUG: mud-cached-triggers = %s" mud-cached-triggers)
 
   (let (( pos 0 ))
+    ;; TODO: replace this with assoc-default, or should I?
     (dolist (trigger mud-cached-triggers)
       (while (and (< pos (length recv-data))
                      (string-match (car trigger) recv-data pos))
-        (cond ((symbolp (cdr trigger)) ; trigger is a symbol or lambda
+        (cond ((symbolp (cdr trigger)) ; trigger's cdr is a property list
                (let ( trigger-result   ; hopefully a function...
                       orig-match-data
                       trigger-match-data
@@ -780,11 +804,28 @@ window (firefox)."
                'insert-behind-hooks '(mud-input-sticky-append-hook))
   (setq mud-sticky-input-flag t))
 
+(defun mud-sticky-backspace (arg &optional killp)
+  (interactive "*p\nP")
+  (if mud-sticky-input-flag
+      (progn
+        (mud-set-input-area "")
+        (mud-input-sticky-off))
+    (backward-delete-char-untabify arg killp)))
+
 
 ;; MUD SETTINGS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(defsubst mud-assign-trigger (settings-alist key value)
+  (mud-assign-setting 'triggers settings-alist key value))
+
+(defsubst mud-assign-alias (settings-alist key value)
+  (mud-assign-setting 'aliases settings-alist key value))
+
 (defun mud-assign-setting (type settings-alist key value)
+  "Creates or replaces a setting of TYPE in the SETTINGS-ALIST provided.
+
+TYPE should be either :filters or :alias."
   (let (type-alist existing-setting)
     (setq type-alist       (cdr (assq type settings-alist))
           existing-setting (assoc key type-alist))
@@ -794,86 +835,136 @@ window (firefox)."
               (cons (cons key value) type-alist))))
   settings-alist)
 
-(defun get-settings-for-mud (hostname)
-  "Retrieves the settings alist for HOSTNAME.  If the hostname is
-not in the `mud-settings' alist, creates an entry for it."
+(defsubst empty-mud-settings ()
+  '((triggers . ())
+    (aliases  . ())))
+
+(defun get-or-init-mud-settings (key alist default)
+  "Retrieves a key-value pair from ALIST associated with KEY or
+initializes the value with DEFAULT.  Modifies the ALIST in-place
+to create the default value.  The result is a cons cell
+representing the key-value pair."
+  (let (setting-pair (assq key alist))
+     (if setting-pair
+         (setting-pair)
+       (let ((oldcar (car alist))
+             (newcar (cons key default)))
+         (setcar alist newcar)
+         (setcdr (cons oldcar (cdr alist))))
+       newcar)))
+
+(defun get-settings-for-mud (hostname &optional username)
+  "Retrieves the settings alist for HOSTNAME.  If an optional
+USERNAME is specified, loads the user-specific settings for that
+USERNAME of that HOSTNAME.  If there are no settings for the HOSTNAME
+or the USERNAME then fallsback to the"
 ;;  (load-mud-settings)
-  (unless (assoc hostname mud-settings)
-    (setq mud-settings
-          (cons `(,hostname . ((:triggers . ())
-                               (:aliases  . ())))
-                mud-settings)))
+  (let ((settings
+         (if username
+             (let ((host-settings (assoc hostname mud-user-settings)))
+               (and host-settings (assoc username host-settings)))
+           nil)))
+    ;; fallback to the mud-host-settings if we could not retrieve
+    ;; mud-user-settings for the given username
+    (unless settings
+      (setq settings (assoc hostname mud-host-settings)))
+    (if settings (cdr settings) (empty-mud-settings))))
 
-  (cdr (assoc hostname mud-settings)))
+(defun set-settings-for-mud (hostname new-settings &optional username)
+  "Stores a new settings alist (NEW-SETTINGS) for HOSTNAME.
+Reloads the settings into any active MUD sessions that are
+connected to the given HOSTNAME."
+  (if username
+      (let* ((host-settings
+              (get-or-init-mud-settings hostname mud-user-settings '()))
+             (user-settings
+              (get-or-init-mud-settings username host-settings '())))
+        (setcdr user-settings new-settings))
 
-(defun set-settings-for-mud (hostname new-settings)
-  (if (assoc hostname mud-settings)
-      (setcdr (assoc hostname mud-settings) new-settings)
-    (progn
-      (setq mud-settings
-            (cons (cons hostname new-settings)
-                  mud-settings))
-      (force-mud-settings-refresh hostname))))
+    (let ((host-settings
+           (get-or-init-mud-settings hostname mud-host-settings '())))
+      (setcdr host-settings new-settings))
 
-(defun force-mud-settings-refresh (hostname &optional settings-type)
+  (force-mud-settings-refresh hostname username)))
+
+(defun force-mud-settings-refresh (hostname &optional username settings-type)
   (dolist (buffer-to-check mud-active-buffers)
     (with-current-buffer buffer-to-check
-      (if (string= mud-host-name hostname)
-          (cache-mud-settings hostname settings-type)))))
+      (if (and (string= mud-host-name hostname)
+               (or (null username) (string= mud-user-name username)))
+          (cache-mud-settings hostname username)))))
 
-(defun cache-mud-settings (hostname &optional setting-type)
+(defun merge-mud-settings (mud-setting-alists)
+  (message "DEBUG mud-setting-alists = %s" mud-setting-alists)
+  (let (result-alist next-alist)
+    (setq result-alist       (car mud-setting-alists)
+          mud-setting-alists (cdr mud-setting-alists))
+    (while mud-setting-alists
+      (setq next-alist
+            (delq nil
+                  (mapcar
+                   (lambda (pair)
+                     ;; Recursively merge nested alists
+                     ;; (they have symbols for keys, like 'triggers)
+                     (if (and (symbolp (car pair))
+                              (assq (car pair) result-alist))
+                         (progn
+                           (setcdr (assq (car pair) result-alist)
+                                   (merge-mud-settings
+                                    (list (cdr (assq (car pair) result-alist))
+                                          (cdr pair))))
+                           nil)
+                       (if (assoc (car pair) result-alist)
+                           nil
+                         pair)))
+                   (car mud-setting-alists))))
+      (setq mud-setting-alists (cdr mud-setting-alists))
+      (setq result-alist (append result-alist next-alist)))
+    result-alist))
+
+(defun cache-mud-settings (hostname &optional username)
+
   "Caches the mud settings for the given HOSTNAME into the mud
 session's active buffer as a buffer local variable.  Resolves
-host specific and global settings, with host specific settings
-overriding global settings."
-  (if (not setting-type)
-      (progn
-        (cache-mud-settings hostname :triggers)
-        (cache-mud-settings hostname :aliases))
+user, host, global, and builtin settings.  Settings have higher
+precedence from left to right in that last sentence.  If a
+USERNAME is specified it also caches the user-specific
+settings."
 
-    (let (loaded-settings global-settings)
-      (setq loaded-settings (cdr (assoc setting-type
-                                        (get-settings-for-mud hostname))))
-      (setq global-settings (cdr (assoc setting-type
-                                        (cdr (assq :GLOBAL mud-settings)))))
-;;       (message "DEBUG: loaded-settings = %s\nDEBUG: global-settings = %s"
-;;                loaded-settings global-settings)
-      (dolist (setting-pair global-settings)
-        (unless (assoc (car setting-pair) loaded-settings)
-          (setq loaded-settings (cons setting-pair loaded-settings))))
+  (let ((loaded-settings
+         (merge-mud-settings
+          (delq nil
+                (list
+                 (get-settings-for-mud hostname username)
+                 (if username (get-settings-for-mud hostname))
+                 mud-global-settings
+                 mud-builtin-settings)))))
 
-      (cond ((eq setting-type :triggers)
-             (setq mud-cached-triggers loaded-settings))
-            ((eq setting-type :aliases)
-             (setq mud-cached-aliases loaded-settings)))
+    (message "DEBUG cached mud settings = %s" loaded-settings)
 
-      loaded-settings)))
+    (setq mud-cached-triggers (cdr (assq 'triggers loaded-settings)))
+    (setq mud-cached-aliases  (cdr (assq 'aliases  loaded-settings)))
+  
+    loaded-settings))
 
 (defun load-mud-settings ()
   (when (file-exists-p mud-settings-file)
     (unless (file-readable-p mud-settings-file)
       (error "EMUD settings file %s exists, but does not have read permission"
              mud-settings-file))
-    (let* (( settings-buffer (generate-new-buffer "EMUD Settings") ))
-      (with-current-buffer settings-buffer
-        (insert-file-contents-literally mud-settings-file))
-      (setq mud-settings (read settings-buffer))
-      (kill-buffer settings-buffer))))
+    (load-file mud-settings-file)))
 
 (defun save-mud-settings ()
-  (let* (( settings-buffer (generate-new-buffer "EMUD Settings") ))
-    (setq mud-settings (mud-grep-list
-                        (lambda (elem)
-                          (and (/= 0 (length
-                                      (cdr (assq :triggers elem))))
-                               (/= 0 (length
-                                      (cdr (assq :aliases elem))))))
-                        mud-settings))
-
-    (print mud-settings settings-buffer)
-    (with-current-buffer settings-buffer
-      (write-file mud-settings-file))
-    (kill-buffer settings-buffer)))
+  (let (( settings-buffer (generate-new-buffer "EMUD Settings") ))
+    (let (( standard-output settings-buffer )
+          ( print-quoted t ))
+      (princ (format "(setq mud-global-settings %S)\n" mud-global-settings))
+      (princ (format "(setq mud-host-settings %S)\n" mud-host-settings))
+      (princ (format "(setq mud-user-settings %S)\n" mud-user-settings))
+      (with-current-buffer settings-buffer
+        (write-file mud-settings-file)))
+    (kill-buffer settings-buffer)
+    (set-file-modes mud-settings-file ?\600)))
 
 
 ;; MUD CONFIG BUFFER ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
