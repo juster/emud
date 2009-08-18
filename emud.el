@@ -224,8 +224,9 @@ the minibuffer has access to it")
 (defun mud-sentinel (mud-process event)
   (when (buffer-name (process-buffer mud-process))
     ;; If we are disconnected, remove buffer from active buffers list
-    (when (string= event "connection reset by peer")
-      (delq (process-buffer) mud-active-buffers))
+    (when (string= event "connection broken by remote peer\n")
+      (setq mud-active-buffers
+            (delq (process-buffer mud-process) mud-active-buffers)))
     (with-current-buffer (process-buffer mud-process)
       (mud-client-message (replace-regexp-in-string "\n+$" "" event)))))
 
@@ -318,6 +319,14 @@ which returned t.  Preserves the original order as well."
       (set-buffer-major-mode mud-buffer))
     (mud-make-local-variables hostname)
     (cache-mud-settings hostname)
+
+    (add-hook 'kill-buffer-hook
+              (lambda ()
+                (message
+                 "DEBUG removing killed buffer from mud-active-buffers\n")
+                (setq mud-active-buffers
+                      (delq (current-buffer) mud-active-buffers)))
+              nil t)                    ; buffer-local hook
 
     ;; Overlay for user input area
     (set (make-local-variable 'mud-input-overlay)
