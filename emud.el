@@ -286,15 +286,13 @@ the minibuffer has access to it")
   "Acts like perl's grep builtin.  Passes each element in
 GREP-LIST to TEST-FUNCTION.  Returns a list of every element
 which returned t.  Preserves the original order as well."
-  (let (( result-list '() )
-        ( len          (length grep-list)))
-    ;; Do things backwards because push adds an element to the front.
-    (dotimes (offset-from-end len)
-      (let (element)
-        (setq element (elt grep-list (- len offset-from-end 1)))
-        (when (funcall test-function element)
-          (push result-list element)))))
-  result-list)
+  (let (result-list element)
+    (while grep-list
+      (setq element (car grep-list)
+            grep-list (cdr grep-list))
+      (when (funcall test-function element)
+          (setq result-list (cons element result-list)))))
+  (nreverse result-list))
 
 ;; COMMANDS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
