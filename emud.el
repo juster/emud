@@ -155,7 +155,7 @@ triggers, aliases, etc."
   '(( triggers . (( "https?://[A-Za-z0-9./?=&;~_%-]+" .
                     (:code mud-trigger-url) ))
                ))
-  "Builtin triggers, and aliases for all sessions.  These cannot be
+  "Builtin triggers and aliases for all sessions.  These cannot be
 edited interactively.")
 
 (defvar mud-global-settings
@@ -185,9 +185,10 @@ same MUD.
                             ( 'aliases . ... )) )) \)")
 
 (defvar mud-server-filters
-  '((mud-color-filter
-     . "\033\\(?:\\[\\(?:\\([0-9;]*\\)\\([^0-9;]\\)?\\)?\\)?")
-    (mud-telnet-filter . "\xFF\\([\xFB-\xFE].\\)"))
+  '((mud-color-filter . "\033\\(?:\\[\\(?:\\([0-9;]*\\)\\([^0-9;]\\)?\\)?\\)?")
+    (mud-telnet-filter     . "\xFF\\([\xFB-\xFE].\\)?")
+    (mud-erase-line-filter . "[^\n]*\x00")
+    (ignore                . "[\x0D]"))
 
   "A list of filters.  Each filter is a cons cell with a regular
 expression and a function to call if the expression matches.
@@ -195,7 +196,7 @@ Filters match special characters, remove them from the server output,
 and change text properties setting `mud-output-text-props'.
 
 No arguments are passed, instead the filter modifies the
-recv-data variable in place.
+`recv-data' variable from `mud-filter' in place.
 
 Server filters search for regular expressions in the output
 received from the MUD server and remove the text in place.  After
@@ -205,23 +206,23 @@ all filters are checked, the output is written to the buffer.
 Filters can throw a 'filter-resume symbol to abort filtering and
 have the server's next output sent straight to the throwing
 filter.  This is useful if the data the filter is parsing is
-split across two socket receives.  For this reason filters must
-return a nil value.")
+split across two socket receives.")
 
-(defvar mud-input-history-active nil
+(defvar mud-input-history-temp nil
   "A global variable to hold our buffer local input history so
 the minibuffer has access to it")
 
 (defmacro read-from-minibuffer-default (prompt default)
-  `(if (boundp ,default)
-       (let ( minibuffer-input )
-         (setq minibuffer-input
-               (read-from-minibuffer (concat ,prompt
-                                             (format " (default %s): "
-                                                     (symbol-value ,default)))))
-         (if (= 0 (length minibuffer-input))
-             (symbol-value ,default) minibuffer-input))
-     (read-from-minibuffer (concat ,prompt ": "))))
+  (if (boundp default)
+       `(let ( minibuffer-input )
+          (setq minibuffer-input
+                (read-from-minibuffer
+                 (concat ,prompt
+                         (format " (default %s): "
+                                 (symbol-value ,default)))))
+          (if (= 0 (length minibuffer-input))
+              (symbol-value ,default) minibuffer-input))
+    `(read-from-minibuffer (concat ,prompt ": "))))
 
 (defvar mud-active-buffers '()
   "A list of currently active MUD sessions/buffers")
@@ -247,41 +248,57 @@ the minibuffer has access to it")
 
 (defun mud-sentinel (mud-process event)
   (when (buffer-name (process-buffer mud-process))
-    ;; If we are disconnected, remove buffer from active buffers list
-    (when (string= event "connection broken by remote peer\n")
-      (setq mud-active-buffers
-            (delq (process-buffer mud-process) mud-active-buffers)))
     (with-current-buffer (process-buffer mud-process)
+      ;; If we are disconnected, remove buffer from active buffers list.
+      ;; Also clear the prompt because it looks weird.
+      (when (string= event "connection broken by remote peer\n")
+        (mud-clear-prompt)
+        (setq mud-active-buffers
+              (delq (process-buffer mud-process) mud-active-buffers)))
       (mud-client-message (replace-regexp-in-string "\n+$" "" event)))))
 
 (defun mud-make-local-variables (hostname)
-  (set (make-local-variable 'mud-host-name) hostname)
-  (set (make-local-variable 'debug-on-error) 1)
-  (set (make-local-variable 'mud-net-process)
+  (set (make-local-variable 'mud-local-host-name) hostname)
+  (set (make-local-variable 'mud-local-net-process)
        (get-buffer-process (current-buffer)))
-  (set (make-local-variable 'mud-sticky-input-flag) nil)
-  (set (make-local-variable 'mud-filter-continuation) nil)
-  (set (make-local-variable 'mud-color-intensity) 1)
-  (set (make-local-variable 'mud-local-echo) t)
-  (make-local-variable 'mud-cached-triggers)
-  (make-local-variable 'mud-cached-aliases)
+  (set (make-local-variable 'mud-local-sticky-input-flag) nil)
+  (set (make-local-variable 'mud-local-filter-continuation) nil)
+  (set (make-local-variable 'mud-local-color-intensity) 1)
+  (set (make-local-variable 'mud-local-local-echo) t)
+  (make-local-variable 'mud-local-cached-triggers)
+  (make-local-variable 'mud-local-cached-aliases)
+
+  (set (make-local-variable 'mud-local-session-triggers) nil)
 
 ;;  (message "DEBUG: mud-active-triggers = %s" mud-active-triggers)
 
   ;; Input History ---------------------------------------
-  (set (make-local-variable 'mud-input-history) '())
+  (set (make-local-variable 'mud-local-input-history) '())
   ;; -----------------------------------------------------
     
   ;; Text properties -------------------------------------
-  (set (make-local-variable 'mud-output-text-props)
+  (set (make-local-variable 'mud-local-output-text-props)
        (copy-tree mud-default-output-props))
-
-  (set (make-local-variable 'tab-width) 8)
-  (set (make-local-variable 'default-tab-width) 8)
   ;; -----------------------------------------------------
 
 
+  (let (( end-of-buffer (point-max) ))
+    ;; Overlay for user input area -------------------------
+    (if (boundp 'mud-local-input-overlay)
+        (mud-clear-input-area)
+      (set (make-local-variable 'mud-local-input-overlay)
+           (make-overlay end-of-buffer end-of-buffer (current-buffer) nil t)))
+    (overlay-put mud-local-input-overlay 'field 'mud-input)
+    (overlay-put mud-local-input-overlay 'non-rearsticky t)
+    (overlay-put mud-local-input-overlay 'face "mud-input-area")
+    (overlay-put mud-local-input-overlay 'invisible nil)
+    ;; -----------------------------------------------------
+    )                                   ; end of let
+
   ;; Override external variables
+  (set (make-local-variable 'tab-width) 8)
+  (set (make-local-variable 'default-tab-width) 8)
+  (set (make-local-variable 'debug-on-error) 1)
   (set (make-local-variable 'scroll-conservatively) 1000)
                                         ; set to a high number
   (buffer-disable-undo))                ; undo don't work good
@@ -290,9 +307,9 @@ the minibuffer has access to it")
 (defun mud-client-message (message)
   "Send a message to the user from the MUD client."
   (save-excursion
-    (goto-char (process-mark mud-net-process))
+    (goto-char (process-mark mud-local-net-process))
     (insert-before-markers
-     (let (( prop-list mud-output-text-props ))
+     (let (( prop-list mud-local-output-text-props ))
        (plist-put prop-list 'face "mud-client-message")
 ;;        (plist-put prop-list 'rear-sticky nil)
 ;;        (plist-put prop-list 'front-sticky nil)
@@ -303,9 +320,9 @@ the minibuffer has access to it")
 (defun mud-append-server-output (output)
   "Append text from the server before the input area."
   (save-excursion
-    (goto-char (process-mark mud-net-process))
+    (goto-char (process-mark mud-local-net-process))
     (insert-before-markers
-     (apply 'propertize output mud-output-text-props))))
+     (apply 'propertize output mud-local-output-text-props))))
 
 (defun mud-grep-list (test-function grep-list)
   "Acts like perl's grep builtin.  Passes each element in
@@ -332,7 +349,7 @@ which returned t.  Preserves the original order as well."
                         :name             mud-name
                         :host             hostname
                         :service          port
-                        :coding           'raw-text
+                        :coding           'emacs-mule-dos
                         :buffer           mud-buffer
                         :filter           'mud-filter
                         :filter-multibyte t
@@ -351,46 +368,36 @@ which returned t.  Preserves the original order as well."
                 (setq mud-active-buffers
                       (delq (current-buffer) mud-active-buffers)))
               nil t)                    ; buffer-local hook
-
-    ;; Overlay for user input area
-    (set (make-local-variable 'mud-input-overlay)
-         (make-overlay (point) (point) (current-buffer) nil t))
-    (overlay-put mud-input-overlay 'field 'mud-input)
-    (overlay-put mud-input-overlay 'non-rearsticky t)
-    (overlay-put mud-input-overlay 'face "mud-input-area")
-    (overlay-put mud-input-overlay 'invisible nil)
-
+    
     (setq mud-active-buffers (cons mud-buffer mud-active-buffers))
 
     (set-window-buffer (selected-window) mud-buffer)))
 
 (defun mud-input-history-exit ()
-  (setq mud-input-history-active nil)
-  (remove-hook 'minibuffer-exit-hook 'mud-input-history-exit))
+  (setq mud-input-history-temp nil)
+  (remove-hook 'minibuffer-exit-hook 'mud-local-input-history-exit))
 
 (defun emud-send-input-history (send-history)
   (interactive
-   (if mud-input-history-active
+   (if mud-input-history-temp
        (error "Cannot browse input history in two frames at once")
      (progn
-       (setq mud-input-history-active mud-input-history)
-       (add-hook 'minibuffer-setup-hook 'mud-input-history-setup)
+       (setq mud-input-history-temp mud-local-input-history)
+;;       (add-hook 'minibuffer-setup-hook 'mud-local-input-history-setup)
        (add-hook 'minibuffer-exit-hook 'mud-input-history-exit)
        (list
         (completing-read "History: "
-                         mud-input-history-active
+                         mud-local-input-history-temp
                          nil nil nil
-                         '(mud-input-history-active . 1)
+                         '(mud-local-input-history-temp . 1)
                          (mud-get-input-area))))))
-;;         (read-from-minibuffer "Resend: " (car mud-input-history-active) nil nil
-;;                               '(mud-input-history-active . 1))))))
   (mud-set-input-area send-history)
   (mud-input-submit))
 
-(defun emud-add-trigger (hostname regexp color)
+(defun emud-add-trigger (hostname regexp action)
   (interactive
    (list
-    (read-from-minibuffer-default "MUD hostname" 'mud-host-name)
+    (read-from-minibuffer-default "MUD hostname" mud-local-host-name)
     (read-from-minibuffer "Trigger Pattern: ")
     (read-from-minibuffer "Trigger Color: ")))
 
@@ -414,7 +421,7 @@ which returned t.  Preserves the original order as well."
               (cons (cons regexp (list :foreground color))
                     host-triggers))))
 
-  (when (string= mud-host-name hostname)
+  (when (string= mud-local-host-name hostname)
     (cache-mud-settings hostname 'triggers))
   (save-mud-settings))
 
@@ -431,8 +438,8 @@ which returned t.  Preserves the original order as well."
     (?\xFD . :DO)
     (?\xFE . :DONT)))
 
-(defmacro mud-telnet-code (symbol)
-  `(car (or () (rassq ,symbol mud-telnet-codes))))
+(defun mud-telnet-code (symbol)
+  (car (rassq symbol mud-telnet-codes)))
 
 (defvar mud-telnet-code-iac  "\xFF")
 (defvar mud-telnet-code-se   "\xFE")
@@ -442,7 +449,10 @@ which returned t.  Preserves the original order as well."
 (defvar mud-telnet-code-dont "\xFE")
 
 (defun mud-telnet-confirm (accept-flag opt-code)
-  "Uses process from `mud-filter'."
+  "Sends a response about the requested option.  If `accept-flag'
+is t, sends we WILL do the option.  If nil sneds we WONT do the option.
+The option's code in the telnet specification is given with `opt-code', a
+character/byte.  Uses the variable `process' from `mud-filter'."
   (process-send-string process
                        (concat
                         mud-telnet-code-iac
@@ -473,15 +483,14 @@ which returned t.  Preserves the original order as well."
            (let (( echo (not (eq (car code-symbols) :WILL)) ))
 ;;             (message "DEBUG: echo = %s" echo)
              (mud-input-echo echo)
-             (setq mud-local-echo echo)))))
-  nil)
+             (setq mud-local-local-echo echo))))))
 
 (defun mud-store-color-codes (color-codes)
   "Stores the mud color codes as the current color to use.
 COLOR-CODES is the string of VT100/ANSI color codes, with ; as a
 delimiter just as they are received.
 
-The new colors are stored in `mud-output-text-props'."
+The new colors are stored in `mud-local-output-text-props'."
   (let (( ansi-codes (split-string color-codes ";" t) ))
     (dolist (code ansi-codes)
       (let* ((code-entry (assoc-string code mud-ansi-color-codes))
@@ -493,23 +502,23 @@ The new colors are stored in `mud-output-text-props'."
                nil)
 
               ((functionp code-action)  ; action is a lambda
-               (setq mud-output-text-props (funcall code-action)))
+               (setq mud-local-output-text-props (funcall code-action)))
 
               (t                        ; action is a property list
 
                                         ; Choose a diff color if we
                                         ; are dim, bright, or
                                         ; normal...
-               (let* ((color-intensity (plist-get mud-output-text-props
+               (let* ((color-intensity (plist-get mud-local-output-text-props
                                                   'mud-color-intensity))
                       (face-prop (list (car code-action)
                                        (nth color-intensity
                                             (cadr code-action)))))
                  ;; Preserve existing text properties
-                 (if (plist-get 'face mud-output-text-props)
-                     (plist-put (plist-get 'font mud-output-text-props)
+                 (if (plist-get 'face mud-local-output-text-props)
+                     (plist-put (plist-get 'font mud-local-output-text-props)
                                 (car face-prop) (cadr face-prop))
-                   (plist-put mud-output-text-props 'face face-prop))
+                   (plist-put mud-local-output-text-props 'face face-prop))
                  )))))))
 
 
@@ -525,6 +534,16 @@ The new colors are stored in `mud-output-text-props'."
       ;; save code for later if it doesn't end
       ;; (it was split between two sends/recvs)
       (throw 'mud-filter-continue t))))
+
+(defun mud-erase-line-filter ()
+  (message "DEBUG: erase-line-filter on: %s" recv-data)
+  (let (( inhibit-read-only t ))
+    (save-excursion
+      (goto-char (process-mark process))
+      (unless (bolp)
+;;        (message "DEBUG: should erase line")
+        (forward-line 0)
+        (delete-region (point) (process-mark process))))))
 
 (defun mud-filter-match-sort (left right)
 ;;  (message "DEBUG sorting, left = %s -- right = %s" left right)
@@ -563,13 +582,13 @@ as the first element, followed by the match position data:
     ;; set preceding text to the old text properties
     (when (< pos (car match-positions))
       (set-text-properties pos (car match-positions)
-                           mud-output-text-props recv-data))
+                           mud-local-output-text-props recv-data))
     (set-match-data match-positions)
-    (when (catch 'mud-filter-continue (funcall (car filter)))
-        ;; If the filter requested a continuation, store the "old" data.
-      (setq mud-filter-continuation
-            (substring recv-data pos (length recv-data)))
-;;      (message "DEBUG: continuation: %s" mud-filter-continuation)
+    (when (catch 'mud-filter-continue
+            (funcall (car filter))
+            nil)
+      ;; If the filter requested a continuation, store the "old" data.
+      (setq mud-local-filter-continuation (substring recv-data pos))
       (setq recv-data (substring recv-data 0 pos))
       (throw 'mud-filter-continue t))
     (set-match-data match-positions)
@@ -586,9 +605,9 @@ Checks all mud server output for any trigger matches after that."
   (with-current-buffer (process-buffer process)
 
     ;; If a filter is continuing from before, prepend the old data.
-    (when mud-filter-continuation
-      (setq recv-data (concat mud-filter-continuation recv-data))
-      (setq mud-filter-continuation nil))
+    (when mud-local-filter-continuation
+      (setq recv-data (concat mud-local-filter-continuation recv-data))
+      (setq mud-local-filter-continuation nil))
 
     (catch 'mud-filter-continue
       (let (( pos        0 )
@@ -602,18 +621,18 @@ Checks all mud server output for any trigger matches after that."
         (when (< pos (1- (length recv-data)))
           (set-text-properties
            pos (length recv-data)
-           mud-output-text-props recv-data))))
+           mud-local-output-text-props recv-data))))
 
     (mud-triggers)
 
-    (save-excursion
-      (goto-char (process-mark process))
-      (insert-before-markers recv-data))))
+    (let (( inhibit-read-only t ))
+      (save-excursion
+        (goto-char (process-mark process))
+        (insert-before-markers recv-data)))))
 
 
 ;; TRIGGERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
 
 (defun mud-triggers ()
 
@@ -641,45 +660,63 @@ text to replace the matching text with.
 :ignore has its ACTION ignored, ironically.  The matching text is
 simply removed."
 
-  ;;  (message "DEBUG: mud-cached-triggers = %s" mud-cached-triggers)
+  ;;  (message "DEBUG: mud-local-cached-triggers = %s" mud-local-cached-triggers)
 
   (let (( pos 0 ))
     ;; TODO: replace this with assoc-default, or should I?
-    (dolist (trigger mud-cached-triggers)
+    (dolist (trigger mud-local-session-triggers)
       (while (and (< pos (length recv-data))
                      (string-match (car trigger) recv-data pos))
-        (cond ((symbolp (cdr trigger)) ; trigger's cdr is a property list
-               (let ( trigger-result   ; hopefully a function...
-                      orig-match-data
-                      trigger-match-data
-                      match-start )
-                 (setq orig-match-data (match-data)
-                       match-start     (car orig-match-data)
-                       trigger-match-data ; make relative to matched string
-                       (mapcar (lambda (pos) (- pos match-start))
-                               trigger-match-data))
-                 (setq trigger-result
-                       (funcall (cdr trigger)
-                                (substring recv-data
-                                           (car orig-match-data)
-                                           (cadr orig-match-data))
-                                trigger-match-data))
-                 (when (stringp trigger-result)
-                   (setq recv-data
-                         (replace-match trigger-result t nil recv-data)))
-                 (setq pos (+ (car orig-match-data)
-                     (length trigger-result)))))
-               
-              ((listp (cdr trigger))
-               (let (( inhibit-read-only t ))
-                 (add-text-properties (match-beginning 0)
-                                      (match-end 0)
-                                      (list 'face (cdr trigger))
-                                      recv-data))
-               (setq pos (1+ (match-end 0))))
+        (let (( trigger-action  (cdr trigger))
+              ( matched-text    (match-string 0 recv-data))
+              ( matched-offsets (match-data)))
 
-              (t (error "Unknown trigger action type for trigger %s"
-                        trigger)))))))
+          ;; Execute a trigger's code and replace the original
+          ;; match with the code's return value, if there is one.
+          (when (plist-get trigger-action :code)
+            (let (( match-start    (car matched-offsets))
+                  ( trigger-result nil ))
+              (set-match-data (mapcar
+                               (lambda (pos)
+                                 (- pos match-start))
+                               matched-offsets))
+              (setq trigger-result
+                    (funcall (plist-get trigger-action :code) matched-text))
+              (if (stringp trigger-result)
+                  (setq matched-text trigger-result))))
+
+          ;; Send a string in response.
+          (when (plist-get trigger-action :respond)
+            (process-send-string mud-local-net-process
+                                 (concat
+                                  (plist-get trigger-action :respond)
+                                  "\n")))
+          ; XXX: we might want to abort here if the code replaced
+          ;      the text with an empty string
+
+          ;; Ignore the matched text, replace it with empty string.
+          (when (plist-get trigger-action :ignore)
+            (setq matched-text ""))
+          
+          ;; Apply text properties to the matched text
+          ;; (or what's left of it)
+          (when (plist-get trigger-action :font)
+            (let (( inhibit-read-only t ))
+              (setq matched-text
+                    (propertize
+                     matched-text
+                     'face (plist-get trigger-action :font)))))
+
+          (setq recv-data
+                (concat
+                 (when (> (car matched-offsets) 0)
+                   (substring recv-data 0 (car matched-offsets)))
+                 matched-text
+                 (when (< (cadr matched-offsets) (length recv-data))
+                   (substring recv-data (cadr matched-offsets)))))
+          (setq pos (+ (car matched-offsets)
+                       (length matched-text))))))))
+
 
 ;; BUILTIN TRIGGERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -688,11 +725,8 @@ simply removed."
 (defun mud-trigger-url (url match-list)
   (let (( map (make-sparse-keymap) ))
     (define-key map [mouse-1] 'mud-open-url-command)
-    (add-text-properties 0 (length url)
-                         (list 'mouse-face 'highlight 'keymap map 'url url
-                               'help-echo "mouse-1: Open this URL in a browser")
-                         url))
-  url)
+    (propertize url 'mouse-face 'highlight 'keymap map 'url url 'help-echo
+                                 "mouse-1: Open this URL in a browser")))
 
 (defun mud-open-url-command (event)
   "Open the URL that was clicked on, either in Emacs or another
@@ -709,72 +743,136 @@ window (firefox)."
       (setq url (get-text-property (1- pos) 'url )))
     (browse-url url)))
 
+;; PROMPT ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun mud-set-prompt (new-prompt-string)
+  (overlay-put mud-local-input-overlay 'before-string new-prompt-string))
+
+(defun mud-get-prompt ()
+  (overlay-get mud-local-input-overlay 'before-string))
+
+(defun mud-clear-prompt ()
+  (overlay-put mud-local-input-overlay 'before-string nil))
+
+(defun emud-set-prompt ( prompt-regexp )
+  (interactive "sPrompt Regexp: ")
+  (mud-clear-prompt))
+
+;; (defun emud-get-prompt ()
+;;   (buffer-substring (overlay-start mud-input-prompt-overlay)
+;;                     (overlay-end   mud-input-prompt-overlay)))
+
+;; (defun emud-set-prompt (new-prompt-string)
+;;   (interactive "S")
+;;   (emud-clear-prompt)
+;;   (let (( inhibit-read-only t ))
+;;     (save-excursion
+;;       (message "DEBUG: prompt-overlay = %s" mud-input-prompt-overlay)
+;;       (goto-char (overlay-start mud-input-prompt-overlay))
+;; ;;      (let (( inhibit-read-only t ))
+;;       (insert-and-inherit new-prompt-string)
+;;       (move-overlay mud-input-prompt-overlay
+;;                     (overlay-start mud-input-prompt-overlay)
+;;                     (point))
+;;       ;; Adjust the input overlay to be past the prompt we just inserted.
+;;       (move-overlay mud-local-input-overlay (point) (point-max))
+;;       (message "DEBUG: prompt-overlay = %s" mud-input-prompt-overlay)
+;;       (add-text-properties (overlay-start mud-input-prompt-overlay)
+;;                            (point)
+;;                            '(read-only t rear-nonsticky t front-sticky t)))))
+
+;; (defun emud-clear-prompt ()
+;;   (let (( inhibit-read-only t ))
+;;     (message "DEBUG: prompt-overlay = %s" mud-input-prompt-overlay)
+;;     (delete-region (overlay-start mud-input-prompt-overlay)
+;;                    (overlay-end   mud-input-prompt-overlay))))
+
+;; (defmacro save-mud-prompt (body-form)
+;;   `(let (( old-prompt (emud-get-prompt) ))
+;;      (emud-set-prompt "")
+;;      ,body-form
+;;      (move-overlay mud-input-prompt-overlay (point-max) (point-max))
+;;      (emud-set-prompt old-prompt)))
 
 ;; INPUT AREA ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
 (defun mud-input-echo (on)
-  (overlay-put mud-input-overlay 'invisible (if on nil t)))
+  (overlay-put mud-local-input-overlay 'invisible (if on nil t)))
 
 (defun mud-input-submit ()
   (interactive)
   (when (and
-         (not (string= (process-status mud-net-process) "closed"))
+         (not (string= (process-status mud-local-net-process) "closed"))
          (mud-inside-input-area-p))
 
     ;; We don't want to trigger our own sticky hooks
     (let* ((inhibit-modification-hooks t)
            (user-input (mud-record-input-area)))
-      (process-send-string mud-net-process (concat user-input "\n"))
-      (when mud-sticky-input
+      (process-send-string mud-local-net-process (concat user-input "\n"))
+      (when (and mud-local-local-echo mud-sticky-input)
         (mud-set-input-area user-input)
-        (mud-input-stick))
-
-      ;; Input history stuff
-      (setq mud-input-history
-            (add-to-history 'mud-input-history user-input mud-history-max)))))
+        (mud-input-stick)))))
 
 (defun mud-record-input-area ()
-  "Store the user's input area text into the connected buffer."
-  (let* ( (user-input-beg    (overlay-start mud-input-overlay))
-          (user-input-end    (overlay-end   mud-input-overlay))
+  "Store the user's input area text into the connected buffer.
+
+The user input that was previously in the input area becomes just
+like the regular server output."
+  (let* ( (user-input-beg    (overlay-start mud-local-input-overlay))
+          (user-input-end    (overlay-end   mud-local-input-overlay))
           (user-input        (buffer-substring user-input-beg user-input-end))
           (user-inside-input (mud-inside-input-area-p)) )
-;;    (message "DEBUG: mud-local-echo = %s" mud-local-echo)
-    (if mud-local-echo
+
+;;    (message "DEBUG: mud-local-local-echo = %s" mud-local-local-echo)
+    (if mud-local-local-echo
         (save-excursion
           (goto-char user-input-end)
-          (insert-before-markers-and-inherit "\n")
-          (add-text-properties user-input-beg (1+ user-input-end)
-                               '(read-only t rear-nonsticky t front-sticky t)))
-      (delete-region user-input-beg user-input-end))
-    (move-overlay mud-input-overlay (point-max) (point-max) (current-buffer))
-    (set-marker (process-mark mud-net-process) (point-max))
-    (when user-inside-input (goto-char (point-max)))
+          ;; insert-and-inherit?
+          (insert-before-markers "\n")
+          (add-text-properties user-input-beg
+                               (1+ user-input-end)
+                               '(read-only t rear-nonsticky t front-sticky t))
+          ;; Input history stuff
+          (setq mud-local-input-history
+                (add-to-history 'mud-local-input-history
+                                user-input mud-history-max)))
+      (mud-clear-input-area))
+
+    ;; Adjust our input area positions and mud output marker to go
+    ;; past our new input...
+    (let (( end-of-buffer (point-max) ))
+      (set-marker (process-mark (get-buffer-process (current-buffer)))
+                  end-of-buffer)
+      (move-overlay mud-local-input-overlay end-of-buffer end-of-buffer
+                    (current-buffer))
+      (when user-inside-input (goto-char end-of-buffer)))
+
     user-input))
 
 (defun mud-clear-input-area ()
-  (delete-region (overlay-start mud-input-overlay)
-                 (overlay-end mud-input-overlay)))
+  (delete-region (overlay-start mud-local-input-overlay)
+                 (overlay-end mud-local-input-overlay)))
 
 (defun mud-set-input-area (new-input)
   (let ((move-to-end (mud-inside-input-area-p)))
     (mud-clear-input-area)
     (save-excursion
-      (goto-char (process-mark mud-net-process))
+      (goto-char (process-mark mud-local-net-process))
       (insert new-input))
     (when move-to-end
       (goto-char (point-max)))))
 
 (defun mud-get-input-area ()
   (buffer-substring-no-properties
-   (overlay-start mud-input-overlay)
-   (overlay-end mud-input-overlay)))
+   (overlay-start mud-local-input-overlay)
+   (overlay-end mud-local-input-overlay)))
 
 (defun mud-inside-input-area-p ()
-  (and (>= (point) (overlay-start mud-input-overlay))
-       (<= (point) (overlay-end mud-input-overlay))))
+  (and (>= (point) (overlay-start mud-local-input-overlay))
+       (<= (point) (overlay-end mud-local-input-overlay))))
 
 
 ;; STICKY INPUT ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -782,9 +880,9 @@ window (firefox)."
 
 
 (defun mud-input-sticky-off ()
-  (overlay-put mud-input-overlay 'modification-hooks nil)
-  (overlay-put mud-input-overlay 'insert-behind-hooks nil)
-  (setq mud-sticky-input-flag nil))
+  (overlay-put mud-local-input-overlay 'modification-hooks nil)
+  (overlay-put mud-local-input-overlay 'insert-behind-hooks nil)
+  (setq mud-local-sticky-input-flag nil))
 
 (defun mud-input-sticky-edit-hook (overlay after start end &optional length)
   (unless after
@@ -797,16 +895,16 @@ window (firefox)."
       (mud-clear-input-area))))
 
 (defun mud-input-stick ()
-  (overlay-put mud-input-overlay
+  (overlay-put mud-local-input-overlay
                'modification-hooks '(mud-input-sticky-edit-hook))
 
-  (overlay-put mud-input-overlay
+  (overlay-put mud-local-input-overlay
                'insert-behind-hooks '(mud-input-sticky-append-hook))
-  (setq mud-sticky-input-flag t))
+  (setq mud-local-sticky-input-flag t))
 
 (defun mud-sticky-backspace (arg &optional killp)
   (interactive "*p\nP")
-  (if mud-sticky-input-flag
+  (if mud-local-sticky-input-flag
       (progn
         (mud-set-input-area "")
         (mud-input-sticky-off))
