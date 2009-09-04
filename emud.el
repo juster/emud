@@ -268,7 +268,7 @@ the minibuffer has access to it")
   (make-local-variable 'mud-local-cached-triggers)
   (make-local-variable 'mud-local-cached-aliases)
 
-  (set (make-local-variable 'mud-local-session-triggers) nil)
+  (set (make-local-variable 'mud-local-triggers) nil)
 
 ;;  (message "DEBUG: mud-active-triggers = %s" mud-active-triggers)
 
@@ -336,6 +336,13 @@ which returned t.  Preserves the original order as well."
           (setq result-list (cons element result-list)))))
   (nreverse result-list))
 
+(defmacro emud-add-trigger (regexp plist-or-symbol)
+  (if (assq regexp mud-local-triggers)
+      `(setcdr (assq ,regexp mud-local-triggers) ,plist-or-symbol)
+    `(setq mud-local-triggers
+           (cons (cons ,regexp ,plist-or-symbol)
+                 mud-local-triggers))))
+
 ;; COMMANDS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -393,38 +400,6 @@ which returned t.  Preserves the original order as well."
                          (mud-get-input-area))))))
   (mud-set-input-area send-history)
   (mud-input-submit))
-
-(defun emud-add-trigger (hostname regexp action)
-  (interactive
-   (list
-    (read-from-minibuffer-default "MUD hostname" mud-local-host-name)
-    (read-from-minibuffer "Trigger Pattern: ")
-    (read-from-minibuffer "Trigger Color: ")))
-
-  (unless (> (length hostname) 0)
-    (error "You must specify a hostname to apply the filter to"))
-  (unless (> (length regexp) 0)
-    (error "You must specify a pattern the trigger should respond to"))
-  (unless (> (length color) 0)
-    (error "You must specify a valid color"))
-
-  (let (mud-host-settings host-triggers)
-    (setq mud-host-settings (get-settings-for-mud hostname))
-    (setq host-triggers (cdr (assoc 'triggers mud-host-settings)))
-    (message "DEBUG: host-triggers = %s" host-triggers)
-
-    (if (assoc regexp host-triggers)
-        (progn
-          (message "DEBUG: replacing existing trigger!")
-          (setcdr (assoc regexp host-triggers) (list :foreground color)))
-      (setcdr (assoc 'triggers mud-host-settings)
-              (cons (cons regexp (list :foreground color))
-                    host-triggers))))
-
-  (when (string= mud-local-host-name hostname)
-    (cache-mud-settings hostname 'triggers))
-  (save-mud-settings))
-
 
 ;; FILTERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -664,7 +639,7 @@ simply removed."
 
   (let (( pos 0 ))
     ;; TODO: replace this with assoc-default, or should I?
-    (dolist (trigger mud-local-session-triggers)
+    (dolist (trigger mud-local-triggers)
       (while (and (< pos (length recv-data))
                      (string-match (car trigger) recv-data pos))
         (let (( trigger-action  (cdr trigger))
@@ -945,7 +920,7 @@ like the regular server output."
 
 (defmacro get-mud-session-data ( type key )
   (cond ((equal type 'trigger)
-         `(assq ,key mud-local-session-triggers))
+         `(assq ,key mud-local-triggers))
         (t
          (error "Type %s is an unknown session data type" type))))
 
@@ -960,7 +935,7 @@ KEY is the generic key used for the data (ie regexp for a trigger)
 VALUE is the new value to assign (ie trigger action plist)"
 
   (cond ((equal type 'trigger)
-         `(set-mud-session-alist ,key ,value mud-local-session-triggers))
+         `(set-mud-session-alist ,key ,value mud-local-triggers))
         (t
          (error "Type %s is an unknown session data type" type))))
 
@@ -1003,7 +978,7 @@ one already exists."
 
 
 (defun clear-mud-settings ()
-  (setq mud-local-session-triggers nil))
+  (setq mud-local-triggers nil))
 
 (defun load-mud-settings ( &optional hostname &optional username )
   (clear-mud-settings)
