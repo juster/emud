@@ -200,6 +200,56 @@ the minibuffer has access to it")
 (defvar mud-active-buffers '()
   "A list of currently active MUD sessions/buffers")
 
+(defvar mud-connect-hook '())
+
+(defvar mud-disconnect-hook '())
+
+
+;; LOCAL VARIABLES ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+(defvar mud-local-host-name nil
+  "Hostname the buffer is connected to.")
+(make-variable-buffer-local 'mud-local-host-name)
+
+(defvar mud-local-net-process nil
+  "Process object that connects the server and client.")
+(make-variable-buffer-local 'mud-local-net-process)
+
+(defvar mud-local-sticky-input-flag nil
+  "Whether the input area is currently 'sticky'.")
+(make-variable-buffer-local 'mud-local-sticky-input-flag)
+
+(defvar mud-local-filter-continuation nil
+  "Left-over, incomplete data from the last filter.")
+(make-variable-buffer-local 'mud-local-filter-continuation)
+
+(defvar mud-local-color-intensity 1
+  "Intensity of the VT100 color codes.  0 = Dim, 1 = Normal, 2 = Bright")
+(make-variable-buffer-local 'mud-local-color-intensity)
+
+(defvar mud-local-echo t
+  "If local echo is enabled, show input as it is typed and sent")
+(make-variable-buffer-local 'mud-local-echo)
+
+(defvar mud-local-cached-triggers nil
+  "Triggers used for the current session")
+(make-variable-buffer-local 'mud-local-cached-triggers)
+
+(defvar mud-local-cached-aliases nil
+  "Aliases used for the current session")
+(make-variable-buffer-local 'mud-local-cached-aliases)
+
+(defvar mud-local-input-history nil
+  "Input history")
+(make-variable-buffer-local 'mud-local-input-history)
+
+(defvar mud-local-input-overlay nil
+  "Overlay which contains the user input area")
+(make-variable-buffer-local 'mud-local-input-overlay)
+
+
 ;; FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -229,53 +279,6 @@ the minibuffer has access to it")
         (setq mud-active-buffers
               (delq (process-buffer mud-process) mud-active-buffers)))
       (mud-client-message (replace-regexp-in-string "\n+$" "" event)))))
-
-(defun mud-make-local-variables (hostname)
-  (set (make-local-variable 'mud-local-host-name) hostname)
-  (set (make-local-variable 'mud-local-net-process)
-       (get-buffer-process (current-buffer)))
-  (set (make-local-variable 'mud-local-sticky-input-flag) nil)
-  (set (make-local-variable 'mud-local-filter-continuation) nil)
-  (set (make-local-variable 'mud-local-color-intensity) 1)
-  (set (make-local-variable 'mud-local-local-echo) t)
-  (make-local-variable 'mud-local-cached-triggers)
-  (make-local-variable 'mud-local-cached-aliases)
-
-  (set (make-local-variable 'mud-local-triggers) nil)
-
-;;  (message "DEBUG: mud-active-triggers = %s" mud-active-triggers)
-
-  ;; Input History ---------------------------------------
-  (set (make-local-variable 'mud-local-input-history) '())
-  ;; -----------------------------------------------------
-    
-  ;; Text properties -------------------------------------
-  (set (make-local-variable 'mud-local-output-text-props)
-       (copy-tree mud-default-output-props))
-  ;; -----------------------------------------------------
-
-
-  (let (( end-of-buffer (point-max) ))
-    ;; Overlay for user input area -------------------------
-    (if (boundp 'mud-local-input-overlay)
-        (mud-clear-input-area)
-      (set (make-local-variable 'mud-local-input-overlay)
-           (make-overlay end-of-buffer end-of-buffer (current-buffer) nil t)))
-    (overlay-put mud-local-input-overlay 'field 'mud-input)
-    (overlay-put mud-local-input-overlay 'non-rearsticky t)
-    (overlay-put mud-local-input-overlay 'face "mud-input-area")
-    (overlay-put mud-local-input-overlay 'invisible nil)
-    ;; -----------------------------------------------------
-    )                                   ; end of let
-
-  ;; Override external variables
-  (set (make-local-variable 'tab-width) 8)
-  (set (make-local-variable 'default-tab-width) 8)
-  (set (make-local-variable 'debug-on-error) 1)
-  (set (make-local-variable 'scroll-conservatively) 1000)
-                                        ; set to a high number
-  (buffer-disable-undo))                ; undo don't work good
-
 
 (defun mud-client-message (message)
   "Send a message to the user from the MUD client."
@@ -367,10 +370,33 @@ Appends a newline to the end if the string doesnt end with newline."
 
     (set-buffer mud-buffer)
     (let ( (default-major-mode 'mud-mode) )
+      (kill-all-local-variables)
       (set-buffer-major-mode mud-buffer))
-    (mud-make-local-variables hostname)
+
+    (setq mud-local-host-name hostname)
+    (setq mud-local-net-process mud-process)
+    (setq mud-local-output-text-props (copy-tree mud-default-output-props))
+
+    ;; Overlay for user input area -------------------------
+    (let (( end-of-buffer (point-max) ))
+      (setq mud-local-input-overlay
+            (make-overlay end-of-buffer end-of-buffer (current-buffer) nil t))
+      (overlay-put mud-local-input-overlay 'field 'mud-input)
+      (overlay-put mud-local-input-overlay 'non-rearsticky t)
+      (overlay-put mud-local-input-overlay 'face "mud-input-area")
+      (overlay-put mud-local-input-overlay 'invisible nil))
+    ;; -----------------------------------------------------
+
+    ;; Override external variables
+    (setq tab-width 8)
+    (set (make-local-variable 'debug-on-error) 1)
+                                        ; set to a high number
+    (set (make-local-variable 'scroll-conservatively) 1000)
+    (buffer-disable-undo)
+
     (load-mud-settings hostname)
 
+    (run-hooks 'mud-connect-hook)
     (add-hook 'kill-buffer-hook
               (lambda ()
                 (message
@@ -378,7 +404,6 @@ Appends a newline to the end if the string doesnt end with newline."
                 (setq mud-active-buffers
                       (delq (current-buffer) mud-active-buffers)))
               nil t)                    ; buffer-local hook
-    
     (setq mud-active-buffers (cons mud-buffer mud-active-buffers))
 
     (set-window-buffer (selected-window) mud-buffer)))
@@ -461,7 +486,7 @@ character/byte.  Uses the variable `process' from `mud-filter'."
            (let (( echo (not (eq (car code-symbols) :WILL)) ))
 ;;             (message "DEBUG: echo = %s" echo)
              (mud-input-echo echo)
-             (setq mud-local-local-echo echo))))))
+             (setq mud-local-echo echo))))))
 
 (defun mud-store-color-codes (color-codes)
   "Stores the mud color codes as the current color to use.
@@ -737,8 +762,10 @@ window (firefox)."
       (setq url (get-text-property (1- pos) 'url )))
     (browse-url url)))
 
+
 ;; PROMPT ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 
 (defun mud-set-prompt (new-prompt-string)
   (overlay-put mud-local-input-overlay 'before-string new-prompt-string))
@@ -806,7 +833,7 @@ window (firefox)."
     (let* ((inhibit-modification-hooks t)
            (user-input (mud-record-input-area)))
       (process-send-string mud-local-net-process (concat user-input "\n"))
-      (when (and mud-local-local-echo mud-sticky-input)
+      (when (and mud-local-echo mud-sticky-input)
         (mud-set-input-area user-input)
         (mud-input-stick)))))
 
@@ -820,8 +847,8 @@ like the regular server output."
           (user-input        (buffer-substring user-input-beg user-input-end))
           (user-inside-input (mud-inside-input-area-p)) )
 
-;;    (message "DEBUG: mud-local-local-echo = %s" mud-local-local-echo)
-    (if mud-local-local-echo
+;;    (message "DEBUG: mud-local-echo = %s" mud-local-echo)
+    (if mud-local-echo
         (save-excursion
           (goto-char user-input-end)
           ;; insert-and-inherit?
