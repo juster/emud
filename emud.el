@@ -151,38 +151,11 @@ triggers, aliases, etc."
     ("46" . (:background ,(nth 6 mud-color-palette)))
     ("47" . (:background ,(nth 7 mud-color-palette)))))
 
-(defvar mud-builtin-settings
-  '(( triggers . (( "https?://[A-Za-z0-9./?=&;~_%-]+" .
-                    (:code mud-trigger-url) ))
-               ))
-  "Builtin triggers and aliases for all sessions.  These cannot be
+(defvar mud-builtin-triggers
+  '(( "https?://[A-Za-z0-9./?=&;~_%-]+" .
+      (:code mud-trigger-url) ))
+  "Builtin triggers for all sessions.  These cannot be
 edited interactively.")
-
-(defvar mud-global-settings
-  '()
-  "Triggers and aliases that are global.  These settings are
-active for sessions connected to each and every remote host.
-
-\(( 'triggers . ( ... ) ) ( 'aliases  . ( ... ) ))")
-
-(defvar mud-host-settings
-  '()
-  "Triggers and aliases that are mud-specific.  These settings
-are organized as an alist with the mud hostname being the key and
-another alist as the values.  The nested alist has 'triggers,
-'aliases, etc as the keys")
-
-(defvar mud-user-settings
-  '()
-  "Contains the username and passwords for each MUD.  MUD
-hostnames are used as the keys, with another alist of usernames
-as keys, and an alist of mud-settings is the value.  This allows
-different usernames to have custom settings even when playing the
-same MUD.
-
-\( HOSTNAME . (( USERNAME . (( 'password . PASSWORD-TEXT )
-                            ( 'triggers . ... )
-                            ( 'aliases . ... )) )) \)")
 
 (defvar mud-server-filters
   '((mud-color-filter . "\033\\(?:\\[\\(?:\\([0-9;]*\\)\\([^0-9;]\\)?\\)?\\)?")
@@ -336,12 +309,42 @@ which returned t.  Preserves the original order as well."
           (setq result-list (cons element result-list)))))
   (nreverse result-list))
 
-(defmacro emud-add-trigger (regexp plist-or-symbol)
-  (if (assq regexp mud-local-triggers)
-      `(setcdr (assq ,regexp mud-local-triggers) ,plist-or-symbol)
-    `(setq mud-local-triggers
-           (cons (cons ,regexp ,plist-or-symbol)
-                 mud-local-triggers))))
+(defun emud-set-trigger (regexp plist-or-symbol)
+  (if (assoc-string regexp mud-local-triggers)
+      (setcdr (assoc-string regexp mud-local-triggers) plist-or-symbol)
+    (setq mud-local-triggers
+          (cons (cons regexp plist-or-symbol)
+                mud-local-triggers))))
+
+(defmacro with-mud-buffers (&rest body)
+  `(dolist (active-buffer mud-active-buffers)
+     (with-current-buffer active-buffer
+       ,@body)))
+
+(defmacro with-host-buffers (host-name &rest body)
+  `(with-mud-buffers
+    (when (string-equal mud-local-host-name ,host-name)
+      ,@body)))
+
+(defun emud-send-line (string-to-send)
+  "Sends STRING-TO-SEND to the mud server for the current buffer.
+Appends a newline to the end if the string doesnt end with newline."
+  (process-send-string mud-local-net-process
+                       (if (string-match "\n$" string-to-send)
+                           string-to-send
+                         (concat string-to-send "\n"))))
+
+(defun emud-color ( color-format string )
+  (let ( color-names color-props )
+    (save-match-data
+      (setq color-names (split-string color-format ":")))
+    (unless (> (length color-names) 0)
+      (error "%%COLOR must be provided at least one color as second argument"))
+    (setq color-props (list :foreground (car color-names)))
+    (when (cadr color-names)
+      (setq color-props (append color-props
+                                (list :background (cadr color-names)))))
+    (apply 'propertize string 'face (list color-props))))
 
 ;; COMMANDS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -610,7 +613,6 @@ Checks all mud server output for any trigger matches after that."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defun mud-triggers ()
-
   "Check the mud server output for text matching triggers.
 
 This function takes no parameters, but uses the recv-data
@@ -634,54 +636,71 @@ text to replace the matching text with.
 
 :ignore has its ACTION ignored, ironically.  The matching text is
 simply removed."
-
-  ;;  (message "DEBUG: mud-local-cached-triggers = %s" mud-local-cached-triggers)
-
   (let (( pos 0 ))
     ;; TODO: replace this with assoc-default, or should I?
+    ;; CREATE a better algorithm for searching, like the mud filters use.
     (dolist (trigger mud-local-triggers)
       (while (and (< pos (length recv-data))
-                     (string-match (car trigger) recv-data pos))
-        (let (( trigger-action  (cdr trigger))
-              ( matched-text    (match-string 0 recv-data))
-              ( matched-offsets (match-data)))
+                  (string-match (car trigger) recv-data pos))
+        (let* (( trigger-action  (cdr trigger)              )
+               ( matched-text    (match-string 0 recv-data) )
+               ( matched-offsets (match-data)               )
+               ( match-start     (car matched-offsets)      )
+               ( trigger-result  nil                        ))
 
-          ;; Execute a trigger's code and replace the original
-          ;; match with the code's return value, if there is one.
-          (when (plist-get trigger-action :code)
-            (let (( match-start    (car matched-offsets))
-                  ( trigger-result nil ))
-              (set-match-data (mapcar
-                               (lambda (pos)
-                                 (- pos match-start))
-                               matched-offsets))
+          (message "DEBUG: trigger regexp matched: %S" (car trigger))
+
+          (set-match-data  (mapcar
+                            (lambda (pos)
+                              (- pos match-start))
+                            (match-data)))
+
+          ;; Triggers made by scripts are symbols
+          (if (symbolp trigger-action)
+              (progn
+;;                (setq pos (cadr matched-offsets))
+                (setq trigger-result
+                      (funcall (symbol-function trigger-action)
+                               trigger-action
+                               (substring recv-data match-start)))
+                (when (stringp trigger-result)
+                  (setq matched-text trigger-result)))
+
+            ;; Triggers made using `emud-config' are property lists
+            ;; Execute a trigger's code and replace the original
+            ;; match with the code's return value, if there is one.
+            (when (plist-get trigger-action :code)
+              (message "DEBUG: calling :code trigger")
               (setq trigger-result
                     (funcall (plist-get trigger-action :code) matched-text))
+              (message "DEBUG: trigger-result = %S" trigger-result)
               (if (stringp trigger-result)
-                  (setq matched-text trigger-result))))
+                  (setq matched-text trigger-result)))
 
-          ;; Send a string in response.
-          (when (plist-get trigger-action :respond)
-            (process-send-string mud-local-net-process
-                                 (concat
-                                  (plist-get trigger-action :respond)
-                                  "\n")))
-          ; XXX: we might want to abort here if the code replaced
-          ;      the text with an empty string
+            ;; Send a string in response.
+            (when (plist-get trigger-action :respond)
+              (process-send-string mud-local-net-process
+                                   (concat
+                                    (plist-get trigger-action :respond)
+                                    "\n")))
+                                        ; XXX: we might want to abort
+                                        ;      here if the code
+                                        ;      replaced the text with
+                                        ;      an empty string
 
-          ;; Ignore the matched text, replace it with empty string.
-          (when (plist-get trigger-action :ignore)
-            (setq matched-text ""))
+            ;; Ignore the matched text, replace it with empty string.
+            (when (plist-get trigger-action :ignore)
+              (setq matched-text ""))
           
-          ;; Apply text properties to the matched text
-          ;; (or what's left of it)
-          (when (plist-get trigger-action :font)
-            (let (( inhibit-read-only t ))
-              (setq matched-text
-                    (propertize
-                     matched-text
-                     'face (plist-get trigger-action :font)))))
-
+            ;; Apply text properties to the matched text
+            ;; (or what's left of it)
+            (when (plist-get trigger-action :font)
+              (let (( inhibit-read-only t ))
+                (setq matched-text
+                      (propertize
+                       matched-text
+                       'face (plist-get trigger-action :font))))))
+          
           (setq recv-data
                 (concat
                  (when (> (car matched-offsets) 0)
@@ -697,7 +716,7 @@ simply removed."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
-(defun mud-trigger-url (url match-list)
+(defun mud-trigger-url (url)
   (let (( map (make-sparse-keymap) ))
     (define-key map [mouse-1] 'mud-open-url-command)
     (propertize url 'mouse-face 'highlight 'keymap map 'url url 'help-echo
@@ -890,80 +909,6 @@ like the regular server output."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
-;; (defsubst mud-assign-trigger (settings-alist key value)
-;;   (mud-assign-setting 'triggers settings-alist key value))
-
-;; (defsubst mud-assign-alias (settings-alist key value)
-;;   (mud-assign-setting 'aliases settings-alist key value))
-
-;; (defun mud-assign-setting (type settings-alist key value)
-;;   "Creates or replaces a setting of TYPE in the SETTINGS-ALIST provided.
-
-;; TYPE should be either :filters or :alias."
-;;   (let (type-alist existing-setting)
-;;     (setq type-alist       (cdr (assq type settings-alist))
-;;           existing-setting (assoc key type-alist))
-;;     (if existing-setting
-;;         (setcdr existing-setting value)
-;;       (setcdr (assq type settings-alist)
-;;               (cons (cons key value) type-alist))))
-;;   settings-alist)
-
-(defsubst set-mud-trigger ( regexp action )
-  "Helper function that will assign a trigger matching REGEXP to ACTION."
-  (set-mud-session-data trigger regexp action))
-
-
-(defsubst get-mud-trigger ( regexp )
-  (get-mud-session-data 'trigger regexp))
-
-
-(defmacro get-mud-session-data ( type key )
-  (cond ((equal type 'trigger)
-         `(assq ,key mud-local-triggers))
-        (t
-         (error "Type %s is an unknown session data type" type))))
-
-
-(defmacro set-mud-session-data ( type key value )
-
-  "Macro that will assign various session data into their correct
-variables and datatypes.
-
-TYPE is a symbol that specifies the data type (ie 'trigger, 'alias).
-KEY is the generic key used for the data (ie regexp for a trigger)
-VALUE is the new value to assign (ie trigger action plist)"
-
-  (cond ((equal type 'trigger)
-         `(set-mud-session-alist ,key ,value mud-local-triggers))
-        (t
-         (error "Type %s is an unknown session data type" type))))
-
-
-(defmacro set-mud-session-alist ( key value alist )
-
-  "Helper macro that will assign VALUE for KEY in ALIST even if
-one already exists."
-
-  (if (assoc key (symbol-value alist))
-      `(setcdr (assoc ,key ,alist) ,value)
-    `(setq ,alist (cons (cons ,key ,value) ,alist))))
-
-
-(defsubst empty-mud-settings ()
-  '((triggers . ())
-    (aliases  . ())))
-
-;; (defmacro get-or-init-mud-settings (key alist default)
-;;   "Retrieves a key-value pair from ALIST associated with KEY or
-;; initializes the value with DEFAULT.  Modifies the ALIST in-place
-;; to create the default value.  The result is a cons cell
-;; representing the key-value pair."
-  
-;;   (if (assq key alist)
-;;       `(assq ,key ,alist)
-;;     `(setq alist (cons (cons ,key ,default) alist))))
-
 (defun mud-load-file (directory filename)
   (unless (file-directory-p directory)
     (make-directory directory))
@@ -976,34 +921,22 @@ one already exists."
                path))
       (load-file path))))
 
-
 (defun clear-mud-settings ()
-  (setq mud-local-triggers nil))
+  (setq mud-local-triggers (copy-tree mud-builtin-triggers)))
 
 (defun load-mud-settings ( &optional hostname &optional username )
+  (unless hostname
+    (or (setq hostname mud-local-host-name)
+        (error "No hostname is set, are we in an emud session buffer?")))
   (clear-mud-settings)
-  (mud-load-file mud-config-base "global")
-  (when hostname
-    (mud-load-file mud-config-base hostname))
-  (when username
-    (mud-load-file (file-name-as-directory
-                    (concat
-                     (file-name-as-directory mud-config-base)
-                     hostname))
-                   username)))
+  (let* (( host-dir   (expand-file-name hostname mud-config-base) ))
+    (mud-load-file mud-config-base "global")
+    (when hostname
+      (mud-load-file mud-config-base hostname))
+    (when username
+      (mud-load-file host-dir username))))
 
-;; (defun save-mud-settings ()
-;;   (let (( settings-buffer (generate-new-buffer "EMUD Settings") ))
-;;     (let (( standard-output settings-buffer )
-;;           ( print-quoted t ))
-;;       (princ (format "(setq mud-global-settings %S)\n" mud-global-settings))
-;;       (princ (format "(setq mud-host-settings %S)\n" mud-host-settings))
-;;       (princ (format "(setq mud-user-settings %S)\n" mud-user-settings))
-;;       (with-current-buffer settings-buffer
-;;         (write-file mud-settings-file)))
-;;     (kill-buffer settings-buffer)
-;;     (set-file-modes mud-settings-file ?\600)))
-
-;;(load "emud-config.el")
-
+(defun mud-hostname-to-filename (hostname)
+  (replace-regexp-in-string "\\." "_" hostname))
+  
 (provide 'emud)
