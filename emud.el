@@ -124,9 +124,9 @@ triggers, aliases, etc."
   `(("0"  . (lambda ()                  ; reset attributes
               (copy-tree mud-default-output-props)))
     ("1"  . (lambda ()                 ; bright
-              (plist-put mud-output-text-props 'mud-color-intensity 1)))
+              (plist-put mud-local-output-text-props 'mud-color-intensity 1)))
     ("2"  . (lambda ()                 ; dim
-              (plist-put mud-output-text-props 'mud-color-intensity 0)))
+              (plist-put mud-local-output-text-props 'mud-color-intensity 0)))
     ("4"  . (:underline t t))           ; underscore
     ("5"  . nil)                        ; blink
     ("7"  . nil)                        ; reverse
@@ -193,7 +193,7 @@ same MUD.
   "A list of filters.  Each filter is a cons cell with a regular
 expression and a function to call if the expression matches.
 Filters match special characters, remove them from the server output,
-and change text properties setting `mud-output-text-props'.
+and change text properties setting `mud-local-output-text-props'.
 
 No arguments are passed, instead the filter modifies the
 `recv-data' variable from `mud-filter' in place.
