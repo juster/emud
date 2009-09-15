@@ -794,45 +794,6 @@ window (firefox)."
 (defun mud-clear-prompt ()
   (overlay-put mud-local-input-overlay 'before-string nil))
 
-(defun emud-set-prompt ( prompt-regexp )
-  (interactive "sPrompt Regexp: ")
-  (mud-clear-prompt))
-
-;; (defun emud-get-prompt ()
-;;   (buffer-substring (overlay-start mud-input-prompt-overlay)
-;;                     (overlay-end   mud-input-prompt-overlay)))
-
-;; (defun emud-set-prompt (new-prompt-string)
-;;   (interactive "S")
-;;   (emud-clear-prompt)
-;;   (let (( inhibit-read-only t ))
-;;     (save-excursion
-;;       (message "DEBUG: prompt-overlay = %s" mud-input-prompt-overlay)
-;;       (goto-char (overlay-start mud-input-prompt-overlay))
-;; ;;      (let (( inhibit-read-only t ))
-;;       (insert-and-inherit new-prompt-string)
-;;       (move-overlay mud-input-prompt-overlay
-;;                     (overlay-start mud-input-prompt-overlay)
-;;                     (point))
-;;       ;; Adjust the input overlay to be past the prompt we just inserted.
-;;       (move-overlay mud-local-input-overlay (point) (point-max))
-;;       (message "DEBUG: prompt-overlay = %s" mud-input-prompt-overlay)
-;;       (add-text-properties (overlay-start mud-input-prompt-overlay)
-;;                            (point)
-;;                            '(read-only t rear-nonsticky t front-sticky t)))))
-
-;; (defun emud-clear-prompt ()
-;;   (let (( inhibit-read-only t ))
-;;     (message "DEBUG: prompt-overlay = %s" mud-input-prompt-overlay)
-;;     (delete-region (overlay-start mud-input-prompt-overlay)
-;;                    (overlay-end   mud-input-prompt-overlay))))
-
-;; (defmacro save-mud-prompt (body-form)
-;;   `(let (( old-prompt (emud-get-prompt) ))
-;;      (emud-set-prompt "")
-;;      ,body-form
-;;      (move-overlay mud-input-prompt-overlay (point-max) (point-max))
-;;      (emud-set-prompt old-prompt)))
 
 ;; INPUT AREA ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
