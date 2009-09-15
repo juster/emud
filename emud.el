@@ -558,7 +558,7 @@ The new colors are stored in `mud-local-output-text-props'."
       (throw 'mud-filter-continue t))))
 
 (defun mud-erase-line-filter ()
-  (message "DEBUG: erase-line-filter on: %s" recv-data)
+;;  (message "DEBUG: erase-line-filter on: %s" recv-data)
   (let (( inhibit-read-only t ))
     (save-excursion
       (goto-char (process-mark process))
@@ -652,7 +652,6 @@ Checks all mud server output for any trigger matches after that."
         (goto-char (process-mark process))
         (insert-before-markers recv-data)))))
 
-
 ;; TRIGGERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -692,7 +691,7 @@ simply removed."
                ( match-start     (car matched-offsets)      )
                ( trigger-result  nil                        ))
 
-          (message "DEBUG: trigger regexp matched: %S" (car trigger))
+;;          (message "DEBUG: trigger regexp matched: %S" (car trigger))
 
           (set-match-data  (mapcar
                             (lambda (pos)
@@ -714,10 +713,10 @@ simply removed."
             ;; Execute a trigger's code and replace the original
             ;; match with the code's return value, if there is one.
             (when (plist-get trigger-action :code)
-              (message "DEBUG: calling :code trigger")
+;;              (message "DEBUG: calling :code trigger")
               (setq trigger-result
                     (funcall (plist-get trigger-action :code) matched-text))
-              (message "DEBUG: trigger-result = %S" trigger-result)
+;;              (message "DEBUG: trigger-result = %S" trigger-result)
               (if (stringp trigger-result)
                   (setq matched-text trigger-result)))
 
