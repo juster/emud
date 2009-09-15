@@ -158,10 +158,9 @@ triggers, aliases, etc."
 edited interactively.")
 
 (defvar mud-server-filters
-  '((mud-color-filter . "\033\\(?:\\[\\(?:\\([0-9;]*\\)\\([^0-9;]\\)?\\)?\\)?")
-    (mud-telnet-filter     . "\xFF\\([\xFB-\xFE].\\)?")
-    (mud-erase-line-filter . "[^\n]*\x00")
-    (ignore                . "[\x0D]"))
+  '(("\033\\(?:\\[\\(?:\\([0-9;]*\\)\\([^0-9;]\\)?\\)?\\)?" . mud-color-filter)
+    ("\xFF\\([\xFB-\xFE].\\)?" . mud-telnet-filter)
+    ("^.*\x0D\x00" . mud-erase-line-filter))
 
   "A list of filters.  Each filter is a cons cell with a regular
 expression and a function to call if the expression matches.
@@ -337,17 +336,36 @@ Appends a newline to the end if the string doesnt end with newline."
                            string-to-send
                          (concat string-to-send "\n"))))
 
-(defun emud-color ( color-format string )
+(defun emud-color (color-format string)
   (let ( color-names color-props )
     (save-match-data
       (setq color-names (split-string color-format ":")))
     (unless (> (length color-names) 0)
-      (error "%%COLOR must be provided at least one color as second argument"))
+      (error
+       "emud-color must be provided at least one color as second argument"))
     (setq color-props (list :foreground (car color-names)))
     (when (cadr color-names)
       (setq color-props (append color-props
                                 (list :background (cadr color-names)))))
     (apply 'propertize string 'face (list color-props))))
+
+(defun mud-find-recv-data-matches (pos regexp-alist)
+  (save-match-data
+    (let (lowest-pos next-match matched match-begin)
+      (while regexp-alist
+        (setq next-match   (car regexp-alist)
+              regexp-alist (cdr regexp-alist)
+              match-begin  (string-match
+                            (car next-match) recv-data pos))
+        (cond ((null match-begin)
+               nil)
+              ((or (null lowest-pos) (< match-begin lowest-pos))
+               (setq matched (list (cons (cdr next-match) (match-data)))
+                     lowest-pos match-begin))
+              ((= match-begin lowest-pos)
+               (setq matched (cons (cons (cdr next-match) (match-data))
+                                   matched)))))
+      matched)))
 
 ;; COMMANDS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -355,58 +373,59 @@ Appends a newline to the end if the string doesnt end with newline."
 ;;;###autoload
 (defun emud-connect (hostname port)
   (interactive "sHostname: \nnPort: ")
+  (let (( mud-host-and-port (format "%s:%d" hostname port) ))
+    (with-temp-message (format "Connecting to %s ..." mud-host-and-port)
+      (let* (( mud-buffer  (generate-new-buffer mud-host-and-port) )
+             ( mud-process (make-network-process
+                            :name             mud-host-and-port
+                            :host             hostname
+                            :service          port
+                            :coding           'emacs-mule-dos
+                            :buffer           mud-buffer
+                            :filter           'mud-filter
+                            :filter-multibyte t
+                            :sentinel         'mud-sentinel) ))
+        (set-buffer mud-buffer)
+        (let ( (default-major-mode 'mud-mode) )
+          (kill-all-local-variables)
+          (set-buffer-major-mode mud-buffer))
 
-  (let* (( mud-name    (format "%s:%d" hostname port) )
-         ( mud-buffer  (generate-new-buffer mud-name) )
-         ( mud-process (make-network-process
-                        :name             mud-name
-                        :host             hostname
-                        :service          port
-                        :coding           'emacs-mule-dos
-                        :buffer           mud-buffer
-                        :filter           'mud-filter
-                        :filter-multibyte t
-                        :sentinel         'mud-sentinel)) )
+        (setq mud-local-host-name hostname)
+        (setq mud-local-net-process mud-process)
+        (setq mud-local-output-text-props
+              (copy-tree mud-default-output-props))
 
-    (set-buffer mud-buffer)
-    (let ( (default-major-mode 'mud-mode) )
-      (kill-all-local-variables)
-      (set-buffer-major-mode mud-buffer))
+        ;; Overlay for user input area -------------------------
+        (let (( end-of-buffer (point-max) ))
+          (setq mud-local-input-overlay
+                (make-overlay end-of-buffer end-of-buffer
+                              (current-buffer) nil t))
+          (overlay-put mud-local-input-overlay 'field 'mud-input)
+          (overlay-put mud-local-input-overlay 'non-rearsticky t)
+          (overlay-put mud-local-input-overlay 'face "mud-input-area")
+          (overlay-put mud-local-input-overlay 'invisible nil))
+        ;; -----------------------------------------------------
 
-    (setq mud-local-host-name hostname)
-    (setq mud-local-net-process mud-process)
-    (setq mud-local-output-text-props (copy-tree mud-default-output-props))
-
-    ;; Overlay for user input area -------------------------
-    (let (( end-of-buffer (point-max) ))
-      (setq mud-local-input-overlay
-            (make-overlay end-of-buffer end-of-buffer (current-buffer) nil t))
-      (overlay-put mud-local-input-overlay 'field 'mud-input)
-      (overlay-put mud-local-input-overlay 'non-rearsticky t)
-      (overlay-put mud-local-input-overlay 'face "mud-input-area")
-      (overlay-put mud-local-input-overlay 'invisible nil))
-    ;; -----------------------------------------------------
-
-    ;; Override external variables
-    (setq tab-width 8)
-    (set (make-local-variable 'debug-on-error) 1)
+        ;; Override external variables
+        (setq tab-width 8)
+        (set (make-local-variable 'debug-on-error) 1)
                                         ; set to a high number
-    (set (make-local-variable 'scroll-conservatively) 1000)
-    (buffer-disable-undo)
+        (set (make-local-variable 'scroll-conservatively) 1000)
+        (buffer-disable-undo)
 
-    (load-mud-settings hostname)
+        (load-mud-settings hostname)
 
-    (run-hooks 'mud-connect-hook)
-    (add-hook 'kill-buffer-hook
-              (lambda ()
-                (message
-                 "DEBUG removing killed buffer from mud-active-buffers\n")
-                (setq mud-active-buffers
-                      (delq (current-buffer) mud-active-buffers)))
-              nil t)                    ; buffer-local hook
-    (setq mud-active-buffers (cons mud-buffer mud-active-buffers))
+        (run-hooks 'mud-connect-hook)
+        (add-hook 'kill-buffer-hook
+                  (lambda ()
+                    (message
+                     "DEBUG removing killed buffer from mud-active-buffers\n")
+                    (setq mud-active-buffers
+                          (delq (current-buffer) mud-active-buffers)))
+                  nil t)                ; buffer-local hook
+        (setq mud-active-buffers (cons mud-buffer mud-active-buffers))
 
-    (set-window-buffer (selected-window) mud-buffer)))
+        (set-window-buffer (selected-window) mud-buffer)))))
 
 (defun mud-input-history-exit ()
   (setq mud-input-history-temp nil)
@@ -613,11 +632,11 @@ Checks all mud server output for any trigger matches after that."
       (setq mud-local-filter-continuation nil))
 
     (catch 'mud-filter-continue
-      (let (( pos        0 )
+      (let (( pos        0   )
+            ( matches    nil )
             ( next-match nil ))
         (while (setq next-match
-                     (car (sort (mud-filter-matches mud-server-filters)
-                                'mud-filter-match-sort)))
+                     (car (mud-find-recv-data-matches pos mud-server-filters)))
           (setq pos (mud-filter-helper pos next-match)))
 
         ;; Set the text properties of leftover text after all filters.
