@@ -51,10 +51,8 @@
 ;; like triggers, aliases, etc.
 ;;
 
-
 ;; CUSTOMIZE ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
 
 (defgroup emud nil
   "The Emacs MUD Client"
@@ -92,10 +90,8 @@ triggers, aliases, etc."
   :type 'file
   :group 'emud)
 
-
 ;; VARIABLES ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
 
 (defvar mud-mode-keymap
   (let ((map (make-sparse-keymap)))
@@ -152,7 +148,7 @@ triggers, aliases, etc."
     ("47" . (:background ,(nth 7 mud-color-palette)))))
 
 (defvar mud-builtin-triggers
-  '(( "https?://[A-Za-z0-9./?=&;~_%-]+" .
+  '(( "https?://[A-Za-z0-9./?=&;~_%#-]+" .
       (:code mud-trigger-url) ))
   "Builtin triggers for all sessions.  These cannot be
 edited interactively.")
@@ -203,10 +199,8 @@ the minibuffer has access to it")
 
 (defvar mud-disconnect-hook '())
 
-
 ;; LOCAL VARIABLES ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
 
 (defvar mud-local-host-name nil
   "Hostname the buffer is connected to.")
@@ -248,10 +242,19 @@ the minibuffer has access to it")
   "Overlay which contains the user input area")
 (make-variable-buffer-local 'mud-local-input-overlay)
 
+(defvar mud-local-trigger-timer nil
+  "Timer to delay triggering on input until all recv data is added
+to the buffer")
+(make-variable-buffer-local 'mud-local-trigger-timer)
+
+(defvar mud-local-trigger-marker nil
+  "Marker of the last place in buffer that was processed by
+triggers.  Text from the marker to the end of buffer is processed
+for triggers when the timer runs out.")
+(make-variable-buffer-local 'mud-local-trigger-marker)
 
 ;; FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
 
 (defun mud-mode ()
   "Major mode for playing MUDs"
@@ -349,14 +352,38 @@ Appends a newline to the end if the string doesnt end with newline."
                                 (list :background (cadr color-names)))))
     (apply 'propertize string 'face (list color-props))))
 
-(defun mud-find-recv-data-matches (pos regexp-alist)
+(defun mud-find-text-matches (pos regexp-alist)
+  "Utility function for finding regexp matches in RECV-DATA or the
+current buffer.
+
+Uses the dynamic variable RECV-DATA to make things faster.  POS is the
+string position to start searches from.  REGEXP-ALIST is a associated
+list with a regular expression as the car of each element and an
+arbitrary value as the cdr.
+
+Returns a list of all matches found.  Each element is a list with
+the cdr from REGEXP-ALIST as the first element and the value
+of `match-data' as the remaining elements.
+
+If POS is a marker then we search the current buffer starting
+at its current position.  Current buffer must be an emud session
+buffer."
   (save-match-data
     (let (lowest-pos next-match matched match-begin)
       (while regexp-alist
         (setq next-match   (car regexp-alist)
               regexp-alist (cdr regexp-alist)
-              match-begin  (string-match
-                            (car next-match) recv-data pos))
+              match-begin
+              (if (markerp pos)
+                  (save-excursion
+                    (goto-char pos)
+                    (and (re-search-forward
+                          (car next-match)
+                          (overlay-start mud-local-input-overlay)
+                          t)
+                         (match-beginning 0)))
+                (string-match (car next-match)
+                              recv-data pos)))
         (cond ((null match-begin)
                nil)
               ((or (null lowest-pos) (< match-begin lowest-pos))
@@ -394,6 +421,9 @@ Appends a newline to the end if the string doesnt end with newline."
         (setq mud-local-net-process mud-process)
         (setq mud-local-output-text-props
               (copy-tree mud-default-output-props))
+
+        (setq mud-local-trigger-marker (make-marker))
+        (set-marker mud-local-trigger-marker 0)
 
         ;; Overlay for user input area -------------------------
         (let (( end-of-buffer (point-max) ))
@@ -450,7 +480,6 @@ Appends a newline to the end if the string doesnt end with newline."
 
 ;; FILTERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
 
 (defvar mud-telnet-codes
   '((?\xFF . :IAC)
@@ -636,7 +665,7 @@ Checks all mud server output for any trigger matches after that."
             ( matches    nil )
             ( next-match nil ))
         (while (setq next-match
-                     (car (mud-find-recv-data-matches pos mud-server-filters)))
+                     (car (mud-find-text-matches pos mud-server-filters)))
           (setq pos (mud-filter-helper pos next-match)))
 
         ;; Set the text properties of leftover text after all filters.
@@ -645,17 +674,30 @@ Checks all mud server output for any trigger matches after that."
            pos (length recv-data)
            mud-local-output-text-props recv-data))))
 
-    (mud-triggers)
+    ;;(mud-schedule-triggers)
 
     (let (( inhibit-read-only t ))
       (save-excursion
         (goto-char (process-mark process))
-        (insert-before-markers recv-data)))))
+        (insert-before-markers recv-data)))
+
+    ;; Scroll the visible text so the input line text is the
+    ;; bottom line of the window.
+    (dolist (mud-window (get-buffer-window-list))
+      (when (mud-inside-input-area-p mud-window)
+        (with-selected-window mud-window
+          (recenter -1))))))
 
 ;; TRIGGERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defun mud-triggers ()
+(defun mud-schedule-triggers ()
+  (when mud-local-trigger-timer
+    (cancel-timer mud-local-trigger-timer))
+  (setq mud-local-trigger-timer
+        (run-at-time "250 millisec" nil 'mud-triggers (current-buffer))))
+
+(defun mud-triggers (mud-buffer)
   "Check the mud server output for text matching triggers.
 
 This function takes no parameters, but uses the recv-data
@@ -679,81 +721,90 @@ text to replace the matching text with.
 
 :ignore has its ACTION ignored, ironically.  The matching text is
 simply removed."
-  (let (( pos 0 ))
-    ;; TODO: replace this with assoc-default, or should I?
-    ;; CREATE a better algorithm for searching, like the mud filters use.
-    (dolist (trigger mud-local-triggers)
-      (while (and (< pos (length recv-data))
-                  (string-match (car trigger) recv-data pos))
-        (let* (( trigger-action  (cdr trigger)              )
-               ( matched-text    (match-string 0 recv-data) )
-               ( matched-offsets (match-data)               )
-               ( match-start     (car matched-offsets)      )
-               ( trigger-result  nil                        ))
+  ;; (message "DEBUG: mud-triggers called, mud-buffer = %s" mud-buffer)
+  (let ( trigger )
+    ;; TODO: allow more than one trigger to operate on the same match.
+    (with-current-buffer mud-buffer
+      (save-excursion
+        (while (setq trigger
+                     (car (mud-find-text-matches
+                           mud-local-trigger-marker mud-local-triggers)))
+          (message "DEBUG: trigger = %s" trigger)
+          (let* (( trigger-action  (car trigger)            )
+                 ( matched-offsets (cdr trigger)            )
+                 ( matched-text    (buffer-substring
+                                    (car matched-offsets)
+                                    (cadr matched-offsets)) )
+                 ( match-start     (car matched-offsets)    )
+                 ( trigger-result  nil                      ))
+            ;;        (message "DEBUG: trigger regexp matched: %S" (car trigger))
+            (set-match-data (mapcar (lambda (pos)
+                                      (- pos match-start))
+                                    matched-offsets))
+            ;; Triggers made by scripts are symbols
+            (if (symbolp trigger-action)
+                (progn
+                  ;;                (setq pos (cadr matched-offsets))
+                  (setq trigger-result
+                        (funcall (symbol-function trigger-action)
+                                 trigger-action
+                                 (substring recv-data match-start)))
+                  (when (stringp trigger-result)
+                    (setq matched-text trigger-result)))
 
-;;          (message "DEBUG: trigger regexp matched: %S" (car trigger))
-
-          (set-match-data  (mapcar
-                            (lambda (pos)
-                              (- pos match-start))
-                            (match-data)))
-
-          ;; Triggers made by scripts are symbols
-          (if (symbolp trigger-action)
-              (progn
-;;                (setq pos (cadr matched-offsets))
+              ;; Triggers made using `emud-config' are property lists
+              ;; Execute a trigger's code and replace the original
+              ;; match with the code's return value, if there is one.
+              (when (plist-get trigger-action :code)
+                ;;              (message "DEBUG: calling :code trigger")
                 (setq trigger-result
-                      (funcall (symbol-function trigger-action)
-                               trigger-action
-                               (substring recv-data match-start)))
-                (when (stringp trigger-result)
-                  (setq matched-text trigger-result)))
+                      (funcall (plist-get trigger-action :code) matched-text))
+                ;;              (message "DEBUG: trigger-result = %S" trigger-result)
+                (if (stringp trigger-result)
+                    (setq matched-text trigger-result)))
 
-            ;; Triggers made using `emud-config' are property lists
-            ;; Execute a trigger's code and replace the original
-            ;; match with the code's return value, if there is one.
-            (when (plist-get trigger-action :code)
-;;              (message "DEBUG: calling :code trigger")
-              (setq trigger-result
-                    (funcall (plist-get trigger-action :code) matched-text))
-;;              (message "DEBUG: trigger-result = %S" trigger-result)
-              (if (stringp trigger-result)
-                  (setq matched-text trigger-result)))
-
-            ;; Send a string in response.
-            (when (plist-get trigger-action :respond)
-              (process-send-string mud-local-net-process
-                                   (concat
-                                    (plist-get trigger-action :respond)
-                                    "\n")))
+              ;; Send a string in response.
+              (when (plist-get trigger-action :respond)
+                (process-send-string mud-local-net-process
+                                     (concat
+                                      (plist-get trigger-action :respond)
+                                      "\n")))
                                         ; XXX: we might want to abort
                                         ;      here if the code
                                         ;      replaced the text with
                                         ;      an empty string
 
-            ;; Ignore the matched text, replace it with empty string.
-            (when (plist-get trigger-action :ignore)
-              (setq matched-text ""))
-          
-            ;; Apply text properties to the matched text
-            ;; (or what's left of it)
-            (when (plist-get trigger-action :font)
-              (let (( inhibit-read-only t ))
-                (setq matched-text
-                      (propertize
-                       matched-text
-                       'face (plist-get trigger-action :font))))))
-          
-          (setq recv-data
-                (concat
-                 (when (> (car matched-offsets) 0)
-                   (substring recv-data 0 (car matched-offsets)))
-                 matched-text
-                 (when (< (cadr matched-offsets) (length recv-data))
-                   (substring recv-data (cadr matched-offsets)))))
-          (setq pos (+ (car matched-offsets)
-                       (length matched-text))))))))
-
+              ;; Ignore the matched text, replace it with empty string.
+              (when (plist-get trigger-action :ignore)
+                (setq matched-text ""))
+              
+              ;; Apply text properties to the matched text
+              ;; (or what's left of it)
+              (when (plist-get trigger-action :font)
+                (let (( inhibit-read-only t ))
+                  (setq matched-text
+                        (propertize
+                         matched-text
+                         'face (plist-get trigger-action :font))))))
+            
+            ;; (setq recv-data
+            ;;       (concat
+            ;;        (when (> (car matched-offsets) 0)
+            ;;          (substring recv-data 0 (car matched-offsets)))
+            ;;        matched-text
+            ;;        (when (< (cadr matched-offsets) (length recv-data))
+            ;;          (substring recv-data (cadr matched-offsets)))))
+            
+            (set-match-data matched-offsets)
+            (message "DEBUG replacing with %s" matched-text)
+            (replace-match matched-text t)
+            (setq mud-local-trigger-marker
+                  (set-marker mud-local-trigger-marker
+                              (+ (car matched-offsets)
+                                 (length matched-text)))))))
+      (setq mud-local-trigger-marker
+            (set-marker mud-local-trigger-marker
+                  (overlay-start mud-local-input-overlay))))))
 
 ;; BUILTIN TRIGGERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -870,9 +921,10 @@ like the regular server output."
    (overlay-start mud-local-input-overlay)
    (overlay-end mud-local-input-overlay)))
 
-(defun mud-inside-input-area-p ()
-  (and (>= (point) (overlay-start mud-local-input-overlay))
-       (<= (point) (overlay-end mud-local-input-overlay))))
+(defun mud-inside-input-area-p (&optional window)
+  (let (( current-point (if window (window-point window) (point)) ))
+    (and (>= current-point (overlay-start mud-local-input-overlay))
+         (<= current-point (overlay-end mud-local-input-overlay)))))
 
 
 ;; STICKY INPUT ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -935,7 +987,7 @@ like the regular server output."
     (or (setq hostname mud-local-host-name)
         (error "No hostname is set, are we in an emud session buffer?")))
   (clear-mud-settings)
-  (let* (( host-dir   (expand-file-name hostname mud-config-base) ))
+  (let* (( host-dir (expand-file-name hostname mud-config-base) ))
     (mud-load-file mud-config-base "global")
     (when hostname
       (mud-load-file mud-config-base hostname))

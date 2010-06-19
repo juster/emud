@@ -223,8 +223,10 @@ a list of statements."
       ,regexp
       (escript-make-trigger
        ,(parse-escript-when-args body)
-       :script            ,(if (boundp 'script-name) script-name nil)
-       :script-variables  ,(if (boundp 'script-variables) script-variables nil)
+       :script            ,(if (boundp 'script-name)
+                               `',script-name nil)
+       :script-variables  ,(if (boundp 'script-variables)
+                               `',script-variables nil)
        :trigger-variables ,trigger-variables))))
 
 (defmacro %SET (var-symbol new-value)
