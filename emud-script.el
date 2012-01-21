@@ -12,34 +12,31 @@
 (defmacro %SCRIPT (script-name &rest body)
   (unless (stringp script-name)
     (error "First argument to %SCRIPT must be a name (string)"))
-  (let ( script-host-name script-variables macros )
+  (let (script-host-name script-variables macros)
     (when (head-is-symbol-p "for" body)
       (unless (stringp (setq script-host-name (cadr body)))
         (error
          "Must provide a mud name as a string after %SCRIPT's FOR option"))
       (setq body (cddr body)))
-    (let (( script-variables '() ))
+    (let ((script-variables '()))
       (setq body (extract-escript-variables body 'script-variables))
-      (setq body (mapcar (lambda (macro)
-                           (macroexpand macro))
-                         body))
-      (message "DEBUG: body = %s" body)
-      `(let (( script-variables ',script-variables ))
-         ,(if script-host-name
-              `(with-host-buffers ,script-host-name ,@body)
+      (setq body (mapcar (lambda (macro) (macroexpand macro)) body))
+      (message "DEBUG: body = %S" body)
+      `(let ((script-variables ',script-variables))
+         ,(if script-host-name `(with-host-buffers ,script-host-name ,@body)
             `(with-mud-buffers ,@body))))))
 
-(defun extract-escript-variables ( macro-args variables-symbol  )
+(defun extract-escript-variables (macro-args variables-symbol)
   "Extracts any LET options given to a macro as arguments.
 ARGS is the argument list.  VARIABLES-SYMBOL is the symbol which
 contains the alist of variable names/values.
 
 Returns all the MACRO-ARGS that were not LET or LET's arguments."
-  (let ( pruned-args new-var-alist )
+  (let (pruned-args new-var-alist)
     (while macro-args
       (if (head-is-symbol-p "LET" macro-args)
-          (let (( let-args (cadr macro-args) )
-                ( let-plist '() ))
+          (let ((let-args  (cadr macro-args))
+                (let-plist '()))
             (unless (and (not (null let-args)) (listp let-args))
               (error
                "Arguments to %%WHERE's VARS option must be a non-empty list of symbols"))
@@ -65,8 +62,7 @@ Returns all the MACRO-ARGS that were not LET or LET's arguments."
                  (append let-plist
                          (symbol-value variables-symbol)))
             (setq macro-args (cddr macro-args))
-            (message "macro-args = %S" macro-args)
-            )
+            (message "macro-args = %S" macro-args))
         (progn
           (setq pruned-args (cons (car macro-args) pruned-args))
           (setq macro-args (cdr macro-args)))))
@@ -76,7 +72,7 @@ Returns all the MACRO-ARGS that were not LET or LET's arguments."
   "Converts VAR-SYMBOL to a string, removes leading $ signs."
   (unless (symbolp var-symbol)
     (error "%S is not a valid symbol object" var-symbol))
-  (let (( var-name-string (symbol-name var-symbol) ))
+  (let ((var-name-string (symbol-name var-symbol)))
     (while (char-equal ?$ (string-to-char var-name-string))
       (setq var-name-string (substring var-name-string 1)))
     var-name-string))
@@ -91,22 +87,22 @@ from the dynamic functions `script-variables' or
 
 If INSIDE-TRIGGER is true, then expands to retrieve the variables
 from the `trigger' parameter's symbol plist at runtime."
-  (let (( plist-symbol
-          (cond ((lax-plist-get trigger-variables var-name)
-                 (if inside-trigger :trigger-variables 'trigger-variables))
-                ((lax-plist-get script-variables var-name)
-                 (if inside-trigger :script-variables 'script-variables))
-                (t 
-                 (message "DEBUG: script-variables = %S var-name = %S"
-                          script-variables
-                          var-name)
-                 (error "Variable named '%s' is not a defined trigger or script variable" var-name)))))
+  (let ((plist-symbol
+         (cond ((lax-plist-get trigger-variables var-name)
+                (if inside-trigger :trigger-variables 'trigger-variables))
+               ((lax-plist-get script-variables var-name)
+                (if inside-trigger :script-variables 'script-variables))
+               (t 
+                (message "DEBUG: script-variables = %S var-name = %S"
+                         script-variables
+                         var-name)
+                (error "Variable named '%s' is not a defined trigger or script variable" var-name)))))
     (if inside-trigger
         `(lax-plist-get (get trigger ,plist-symbol) ,var-name)
       (lax-plist-get (symbol-value plist-symbol) var-name))))
 
 (defun replace-escript-var-string (var-string)
-  (let ( chunked var-name )
+  (let (chunked var-name)
     (while (string-match "\\$\\([0-9]\\|[a-zA-Z_-]+\\)\\b" var-string)
       (setq var-name (match-string 1 var-string))
       (setq chunked
@@ -165,13 +161,12 @@ a list of statements."
   ;; we replace all variables that we can find
   (setq code (mapcar 'find-and-replace-escript-vars code))
 
-  `(progn
-     ,@code))
+  `(progn ,@code))
 
 (defun escript-when-foreach (regexp foreach-body)
-  (let (( pos-symbol (make-symbol "foreach-position") ))
-    `(let (( ,pos-symbol 0 )
-           ( iter-count  0 ))
+  (let ((pos-symbol (make-symbol "foreach-position")))
+    `(let ((,pos-symbol 0)
+           (iter-count  0))
        (save-match-data
          (while (and (< ,pos-symbol (1- (length match)))
                      (< iter-count 100)
@@ -185,11 +180,11 @@ a list of statements."
            (message "Warning: FOREACH loop reached maxed iterations" ))))))
 
 (defun parse-escript-when-args (body)
-  (let ( result element trigger-return-val )
+  (let (result element trigger-return-val)
     (while body
       (setq element (car body) body (cdr body))
       (if (symbolp element)
-        (let (( option (upcase (symbol-name element)) ))
+        (let ((option (upcase (symbol-name element))))
           (cond ((string= option "FOREACH")
                  (push (escript-when-foreach (car body) (cdr body)) result)
                  (setq body (cddr body)))
@@ -197,7 +192,7 @@ a list of statements."
                  (setq trigger-return-val
                        '(propertize match 'invisible t)))
                 (t
-                 (error "Unknown %WHEN option: '%s'" option))))
+                 (error "Unknown %%WHEN option: '%s'" option))))
         ;; Everything other than symbols should be code
         (push (escript-expand-code element) result))
       )
@@ -206,18 +201,17 @@ a list of statements."
        ,@result
        ,trigger-return-val)))
 
-(defun escript-var-symbol ( prefixed-variable-symbol )
-  (make-symbol (escript-var-symbol-to-string
-                prefixed-variable-symbol)))
+(defun escript-var-symbol (prefixed-variable-symbol)
+  (make-symbol (escript-var-symbol-to-string prefixed-variable-symbol)))
 
 (defun escript-make-trigger (code &rest trigger-plist)
-  (let (( trigger-symbol (make-symbol "trigger") ))
+  (let ((trigger-symbol (make-symbol "trigger")))
     (fset trigger-symbol code)
     (setplist trigger-symbol trigger-plist)
     trigger-symbol))
 
 (defmacro %WHEN (regexp &rest body)
-  (let ( trigger-variables )
+  (let (trigger-variables)
     (setq body (extract-escript-variables body 'trigger-variables))
     `(emud-set-trigger
       ,regexp
@@ -231,25 +225,25 @@ a list of statements."
   "A macro to be used inside a trigger definition (%WHERE macro).
 Assigns either a script or trigger scoped variable named VAR-NAME
 with the new value NEW-VALUE."
-  (let* (( var-name (escript-var-symbol-to-string var-symbol))
-         ( plist-symbol
-           (cond ((lax-plist-get trigger-variables var-name)
-                  :trigger-variables)
-                 ((lax-plist-get script-variables var-name)
-                  :script-variables)
-                 (t
-                  (error "Variable named '%s' is not a defined trigger or script variable" var-name)))))
+  (let* ((var-name (escript-var-symbol-to-string var-symbol))
+         (plist-symbol
+          (cond ((lax-plist-get trigger-variables var-name)
+                 :trigger-variables)
+                ((lax-plist-get script-variables var-name)
+                 :script-variables)
+                (t
+                 (error "Variable named '%s' is not a defined trigger or script variable" var-name)))))
     `(lax-plist-put (get trigger ,plist-symbol) ,var-name ,new-value)))
 
 (defmacro %GET (var-symbol)
-  (let* (( var-name (escript-var-symbol-to-string var-symbol))
-         ( plist-symbol
-           (cond ((lax-plist-get trigger-variables var-name)
-                  :trigger-variables)
-                 ((lax-plist-get script-variables var-name)
-                  :script-variables)
-                 (t
-                  (error "Variable named '%s' is not a defined trigger or script variable" var-name)))))
+  (let* ((var-name (escript-var-symbol-to-string var-symbol))
+         (plist-symbol
+          (cond ((lax-plist-get trigger-variables var-name)
+                 :trigger-variables)
+                ((lax-plist-get script-variables var-name)
+                 :script-variables)
+                (t
+                 (error "Variable named '%s' is not a defined trigger or script variable" var-name)))))
     `(lax-plist-get (get trigger ,plist-symbol) ,var-name)))
 
 (defmacro %COLOR (color-format string)

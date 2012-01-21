@@ -362,7 +362,7 @@ Appends a newline to the end if the string doesnt end with newline."
                          (concat string-to-send "\n"))))
 
 (defun emud-color (color-format string)
-  (let ( color-names color-props )
+  (let (color-names color-props)
     (save-match-data
       (setq color-names (split-string color-format ":")))
     (unless (> (length color-names) 0)
@@ -700,8 +700,7 @@ Each trigger is a cons cell with a REGEXP and corresponding actions:
                (match-start     (car matched-offsets))
                (trigger-result  nil))
 
-;;          (message "DEBUG: trigger regexp matched: %S" (car trigger))
-
+          (message "DEBUG: trigger regexp matched: %S" (car trigger))
           (set-match-data  (mapcar
                             (lambda (pos)
                               (- pos match-start))
@@ -711,10 +710,13 @@ Each trigger is a cons cell with a REGEXP and corresponding actions:
           (if (symbolp trigger-action)
               (progn
 ;;                (setq pos (cadr matched-offsets))
+                (message "DEBUG: trigger-action = %S"
+                         (symbol-function trigger-action))
                 (setq trigger-result
                       (funcall (symbol-function trigger-action)
                                trigger-action
                                (substring recv-data match-start)))
+                (message "DEBUG: trigger-result = %S" trigger-result)
                 (when (stringp trigger-result)
                   (setq matched-text trigger-result)))
 
@@ -790,13 +792,15 @@ window (firefox)."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
-(defun mud-set-prompt (new-prompt-string)
+(defun emud-set-prompt (new-prompt-string)
+  (interactive "sPrompt: \n")
   (overlay-put mud-local-input-overlay 'before-string new-prompt-string))
 
-(defun mud-get-prompt ()
+(defun emud-get-prompt ()
   (overlay-get mud-local-input-overlay 'before-string))
 
-(defun mud-clear-prompt ()
+(defun emud-clear-prompt ()
+  (interactive)
   (overlay-put mud-local-input-overlay 'before-string nil))
 
 
@@ -935,7 +939,7 @@ like the regular server output."
     (or (setq hostname mud-local-host-name)
         (error "No hostname is set, are we in an emud session buffer?")))
   (clear-mud-settings)
-  (let* (( host-dir   (expand-file-name hostname mud-config-base) ))
+  (let ((host-dir (expand-file-name hostname mud-config-base)))
     (mud-load-file mud-config-base "global")
     (when hostname
       (mud-load-file mud-config-base hostname))
