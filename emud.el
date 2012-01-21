@@ -101,7 +101,7 @@ triggers, aliases, etc."
   (let ((map (make-sparse-keymap)))
     (define-key map "\r"       'mud-input-submit)
     (define-key map "\C-c\C-h" 'emud-send-input-history)
-    (define-key map "\d"       'mud-sticky-backspace)
+    (define-key map "\d"       'emud-sticky-backspace)
     map))
 
 ; the sticky properties below don't have to do with sticky-input
@@ -199,9 +199,11 @@ the minibuffer has access to it")
 (defvar mud-active-buffers '()
   "A list of currently active MUD sessions/buffers")
 
-(defvar mud-connect-hook '())
+(defvar emud-connect-hook '()
+  "Hooks that are run after connecting to any MUD server.")
 
-(defvar mud-disconnect-hook '())
+(defvar emud-disconnect-hook '()
+  "Hooks that are run after disconnecting from any MUD server.")
 
 
 ;; LOCAL VARIABLES ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -315,8 +317,7 @@ which returned t.  Preserves the original order as well."
   (if (assoc-string regexp mud-local-triggers)
       (setcdr (assoc-string regexp mud-local-triggers) plist-or-symbol)
     (setq mud-local-triggers
-          (cons (cons regexp plist-or-symbol)
-                mud-local-triggers))))
+          (cons (cons regexp plist-or-symbol) mud-local-triggers))))
 
 (defmacro with-mud-buffers (&rest body)
   `(dolist (active-buffer mud-active-buffers)
@@ -414,12 +415,11 @@ Appends a newline to the end if the string doesnt end with newline."
         (buffer-disable-undo)
 
         (load-mud-settings hostname)
-
-        (run-hooks 'mud-connect-hook)
+        (run-hooks 'emud-connect-hook)
         (add-hook 'kill-buffer-hook
                   (lambda ()
-                    (message
-                     "DEBUG removing killed buffer from mud-active-buffers\n")
+;;                     (message
+;;                      "DEBUG removing killed buffer from mud-active-buffers\n")
                     (setq mud-active-buffers
                           (delq (current-buffer) mud-active-buffers)))
                   nil t)                ; buffer-local hook
@@ -496,13 +496,13 @@ character/byte.  Uses the variable `process' from `mud-filter'."
             (mud-telnet-extract-codes telnet-code-string (1+ pos))))))
 
 (defun mud-telnet-filter ()
-  (let* (( telnet-codes (match-string 1 recv-data) )
-         ( code-symbols (mud-telnet-extract-codes telnet-codes) ))
+  (let* ((telnet-codes (match-string 1 recv-data))
+         (code-symbols (mud-telnet-extract-codes telnet-codes)))
 
 ;;    (message "DEBUG: parsed symbols: %s" code-symbols)
     (cond ((= (elt code-symbols 1) 1)
 ;;           (message "DEBUG: received echo code")
-           (let (( echo (not (eq (car code-symbols) :WILL)) ))
+           (let ((echo (not (eq (car code-symbols) :WILL))))
 ;;             (message "DEBUG: echo = %s" echo)
              (mud-input-echo echo)
              (setq mud-local-echo echo))))))
@@ -800,7 +800,7 @@ window (firefox)."
 
 
 (defun mud-input-echo (on)
-  (overlay-put mud-local-input-overlay 'invisible (if on nil t)))
+  (overlay-put mud-local-input-overlay 'invisible (not on)))
 
 (defun mud-input-submit ()
   (interactive)
@@ -808,13 +808,14 @@ window (firefox)."
          (not (string= (process-status mud-local-net-process) "closed"))
          (mud-inside-input-area-p))
 
-    ;; We don't want to trigger our own sticky hooks
-    (let* ((inhibit-modification-hooks t)
+    (let* ((inhibit-modification-hooks t) ; disables internal sticky hooks
            (user-input (mud-record-input-area)))
       (process-send-string mud-local-net-process (concat user-input "\n"))
+
+      ;; Turn on sticky input hooks if local echo and sticky input is enabled.
       (when (and mud-local-echo mud-sticky-input)
         (mud-set-input-area user-input)
-        (mud-input-stick)))))
+        (mud-input-sticky t)))))
 
 (defun mud-record-input-area ()
   "Store the user's input area text into the connected buffer.
@@ -879,35 +880,29 @@ like the regular server output."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
-(defun mud-input-sticky-off ()
-  (overlay-put mud-local-input-overlay 'modification-hooks nil)
-  (overlay-put mud-local-input-overlay 'insert-behind-hooks nil)
-  (setq mud-local-sticky-input-flag nil))
-
 (defun mud-input-sticky-edit-hook (overlay after start end &optional length)
   (unless after
-    (mud-input-sticky-off)))
+    (mud-input-sticky nil)))
 
 (defun mud-input-sticky-append-hook (overlay after start end &optional length)
   (unless after
     (let ((inhibit-modification-hooks t))
-      (mud-input-sticky-off)
+      (mud-input-sticky nil)
       (mud-clear-input-area))))
 
-(defun mud-input-stick ()
-  (overlay-put mud-local-input-overlay
-               'modification-hooks '(mud-input-sticky-edit-hook))
+(defun mud-input-sticky (enable)
+  (let ((mod-hook   (and enable '(mud-input-sticky-edit-hook)))
+        (input-hook (and enable '(mud-input-sticky-append-hook))))
+    (overlay-put mud-local-input-overlay 'modification-hooks mod-hook)
+    (overlay-put mud-local-input-overlay 'insert-behind-hooks input-hook)
+    (setq mud-local-sticky-input-flag nil)))
 
-  (overlay-put mud-local-input-overlay
-               'insert-behind-hooks '(mud-input-sticky-append-hook))
-  (setq mud-local-sticky-input-flag t))
-
-(defun mud-sticky-backspace (arg &optional killp)
+(defun emud-sticky-backspace (arg &optional killp)
   (interactive "*p\nP")
   (if mud-local-sticky-input-flag
       (progn
         (mud-set-input-area "")
-        (mud-input-sticky-off))
+        (mud-input-sticky nil))
     (backward-delete-char-untabify arg killp)))
 
 
@@ -920,7 +915,7 @@ like the regular server output."
     (make-directory directory))
   (setq filename (replace-regexp-in-string "\\." "_" filename))
   (let (( path (concat (file-name-as-directory directory) filename ".el") ))
-    (message "DEBUG: path = %s" path)
+;;     (message "DEBUG: path = %s" path)
     (when (file-exists-p path)
       (unless (file-readable-p path)
         (error "EMUD config file %s exists, but does not have read permission"
@@ -930,7 +925,7 @@ like the regular server output."
 (defun clear-mud-settings ()
   (setq mud-local-triggers (copy-tree mud-builtin-triggers)))
 
-(defun load-mud-settings ( &optional hostname &optional username )
+(defun load-mud-settings (&optional hostname &optional username)
   (unless hostname
     (or (setq hostname mud-local-host-name)
         (error "No hostname is set, are we in an emud session buffer?")))
