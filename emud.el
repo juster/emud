@@ -314,10 +314,34 @@ which returned t.  Preserves the original order as well."
   (nreverse result-list))
 
 (defun emud-set-trigger (regexp plist-or-symbol)
-  (if (assoc-string regexp mud-local-triggers)
-      (setcdr (assoc-string regexp mud-local-triggers) plist-or-symbol)
-    (setq mud-local-triggers
-          (cons (cons regexp plist-or-symbol) mud-local-triggers))))
+"Sets a trigger to be executed when REGEXP is seen in output from the
+server to the MUD client.
+
+PLIST-OR-SYMBOL can be a property list or a symbol. The property
+lists are documented below. Symbols are used for scripting and
+I forget how they work at the moment ... :P
+
+:ACTION-TYPE can be :font :respond :code or :ignore.  Only one
+of each type can be present.  In this way actions are like
+property lists, but they are presorted by `cache-mud-settings' so
+they are executed in the proper order.
+
+:font must have a face attribute list as ACTION.
+
+:respond must have a string as ACTION
+
+:code must have a list beginning with 'lambda or a symbol to a
+function.  Anything `funcall' can use.  The function must return
+text to replace the matching text with.
+
+:ignore has its ACTION ignored, ironically.  The matching text is
+simply removed."
+  (interactive "sRegexp: \nXTrigger (ex: symbol or '(:type action)): \n")
+  ;; TODO: check the value of the trigger?!
+  (let ((trig (assoc-string regexp mud-local-triggers)))
+    (if trig (setcdr trig plist-or-symbol)
+      (setq mud-local-triggers
+            (cons (cons regexp plist-or-symbol) mud-local-triggers)))))
 
 (defmacro with-mud-buffers (&rest body)
   `(dolist (active-buffer mud-active-buffers)
@@ -658,38 +682,23 @@ Checks all mud server output for any trigger matches after that."
 (defun mud-triggers ()
   "Check the mud server output for text matching triggers.
 
-This function takes no parameters, but uses the recv-data
+This function takes no parameters, but uses the dynamically-scoped recv-data
 parameter from `mud-filter', where it is called from.
 
 Each trigger is a cons cell with a REGEXP and corresponding actions:
-\( REGEXP . ( :ACTION-TYPE ACTION [ :ACTION-TYPE ACTION ... ] ) )
+\(REGEXP . (:ACTION-TYPE ACTION [ :ACTION-TYPE ACTION ... ]))"
 
-:ACTION-TYPE can be :color :code :respond or :ignore.  Only one
-of each type can be present.  In this way actions are like
-property lists, but they are presorted by `cache-mud-settings' so
-they are executed in the proper order.
-
-:font must have a font attribute list as ACTION.
-
-:respond must have a string as ACTION
-
-:code must have a list beginning with 'lambda or a symbol to a
-function.  Anything `funcall' can use.  The function must return
-text to replace the matching text with.
-
-:ignore has its ACTION ignored, ironically.  The matching text is
-simply removed."
   (let (( pos 0 ))
     ;; TODO: replace this with assoc-default, or should I?
     ;; CREATE a better algorithm for searching, like the mud filters use.
     (dolist (trigger mud-local-triggers)
       (while (and (< pos (length recv-data))
                   (string-match (car trigger) recv-data pos))
-        (let* (( trigger-action  (cdr trigger)              )
-               ( matched-text    (match-string 0 recv-data) )
-               ( matched-offsets (match-data)               )
-               ( match-start     (car matched-offsets)      )
-               ( trigger-result  nil                        ))
+        (let* ((trigger-action  (cdr trigger))
+               (matched-text    (match-string 0 recv-data))
+               (matched-offsets (match-data))
+               (match-start     (car matched-offsets))
+               (trigger-result  nil))
 
 ;;          (message "DEBUG: trigger regexp matched: %S" (car trigger))
 
@@ -722,14 +731,11 @@ simply removed."
 
             ;; Send a string in response.
             (when (plist-get trigger-action :respond)
-              (process-send-string mud-local-net-process
-                                   (concat
-                                    (plist-get trigger-action :respond)
-                                    "\n")))
-                                        ; XXX: we might want to abort
-                                        ;      here if the code
-                                        ;      replaced the text with
-                                        ;      an empty string
+              (process-send-string
+               mud-local-net-process
+               (concat (plist-get trigger-action :respond) "\n")))
+            ;; XXX: we might want to abort here if the code replaced
+            ;; the text with an empty string
 
             ;; Ignore the matched text, replace it with empty string.
             (when (plist-get trigger-action :ignore)
@@ -751,8 +757,7 @@ simply removed."
                  matched-text
                  (when (< (cadr matched-offsets) (length recv-data))
                    (substring recv-data (cadr matched-offsets)))))
-          (setq pos (+ (car matched-offsets)
-                       (length matched-text))))))))
+          (setq pos (+ (car matched-offsets) (length matched-text))))))))
 
 
 ;; BUILTIN TRIGGERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
